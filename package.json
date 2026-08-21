@@ -1,0 +1,12 @@
+{
+  "name": "employee-debts-api",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Standalone Apps Script JSON API backing the Employee Debts/Product Search PWA.",
+  "scripts": {
+    "push": "clasp push",
+    "deploy": "clasp deploy",
+    "open": "clasp open",
+    "logs": "clasp logs"
+  }
+}
