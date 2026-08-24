@@ -162,6 +162,21 @@ function daftraPaginate_(path, params, unwrapKey, onPage) {
 // Long Debtors -- who currently owes the shop money, per client.
 // ============================================================
 
+// clients.json's Client resource has a "suspend" field ("0" = active,
+// confirmed 2026-08-22 against a real account) -- invoices.json doesn't
+// carry that flag on its embedded client fields, so this is a second,
+// separate paginated fetch, done once per refresh and cached in the map
+// below rather than per-invoice.
+function getSuspendedClientIds_() {
+    const suspended = {};
+    daftraPaginate_("clients.json", {}, "Client", (clients) => {
+        clients.forEach((c) => {
+            if (String(c.suspend) === "1") suspended[c.id] = true;
+        });
+    });
+    return suspended;
+}
+
 function getDaftraOutstandingDebts() {
     const balances = {}; // client_id -> { clientId, clientName, amount, phone }
 
@@ -188,21 +203,33 @@ function getDaftraOutstandingDebts() {
         });
     });
 
-    return Object.values(balances).sort((a, b) => b.amount - a.amount);
+    const suspended = getSuspendedClientIds_();
+
+    return Object.values(balances)
+        .filter((d) => !suspended[d.clientId])
+        .sort((a, b) => b.amount - a.amount);
 }
 
 // ============================================================
-// Long Debtor account statement -- assembled from invoices + both kinds
-// of payment, since Daftra has no single "client statement" API endpoint
+// Long Debtor account activity -- assembled from invoices + both kinds of
+// payment, since Daftra has no single "client statement" API endpoint
 // (confirmed by research; statements/aged-ledger are web-report-only).
-// Cross-check the computed balance against the real Aged Ledger report
-// (Reports -> Client Aged Ledger) for a client or two before trusting it.
+//
+// Scoped to the last 30 days only (owner's call, 2026-08-22): showing
+// full history was both slow (20-30+ seconds for an active client,
+// scanning everything) and not what's actually wanted day to day. The
+// headline "Balance" the app shows is the debtor's already-known total
+// (from the Debts Snapshot / getDaftraOutstandingDebts, computed off
+// Daftra's summary_unpaid) -- NOT recomputed from this partial window,
+// since a running total over just 30 days would be a confusingly wrong
+// number for any debt older than that.
 // ============================================================
 
 function getDaftraClientStatement(clientId) {
-    const entries = []; // { date, type, description, amount, balanceAfter }
+    const entries = []; // { date, type, description, amount }
+    const from = Utilities.formatDate(addDays_(new Date(), -30), Session.getScriptTimeZone(), "yyyy-MM-dd");
 
-    daftraPaginate_("invoices.json", { client_id: clientId }, "Invoice", (invoices) => {
+    daftraPaginate_("invoices.json", { client_id: clientId, date_from: from }, "Invoice", (invoices) => {
         invoices.forEach((inv) => {
             entries.push({
                 date: inv.date || inv.created,
@@ -213,7 +240,7 @@ function getDaftraClientStatement(clientId) {
         });
     });
 
-    daftraPaginate_("invoice_payments.json", { client_id: clientId }, "InvoicePayment", (payments) => {
+    daftraPaginate_("invoice_payments.json", { client_id: clientId, date_from: from }, "InvoicePayment", (payments) => {
         payments.forEach((p) => {
             entries.push({
                 date: p.date,
@@ -224,7 +251,7 @@ function getDaftraClientStatement(clientId) {
         });
     });
 
-    daftraPaginate_("client_payments.json", { client_id: clientId }, "ClientPayment", (payments) => {
+    daftraPaginate_("client_payments.json", { client_id: clientId, date_from: from }, "ClientPayment", (payments) => {
         payments.forEach((p) => {
             entries.push({
                 date: p.date,
@@ -235,15 +262,15 @@ function getDaftraClientStatement(clientId) {
         });
     });
 
-    entries.sort((a, b) => new Date(a.date) - new Date(b.date));
+    entries.sort((a, b) => new Date(b.date) - new Date(a.date));
 
-    let running = 0;
-    entries.forEach((e) => {
-        running += e.amount;
-        e.balanceAfter = running;
-    });
+    return { entries, periodDays: 30 };
+}
 
-    return { entries, balance: running };
+function addDays_(date, n) {
+    const d = new Date(date);
+    d.setDate(d.getDate() + n);
+    return d;
 }
 
 // Records a payment directly to a client's account (not tied to one
@@ -287,6 +314,7 @@ function searchDaftraProducts(query) {
 
     daftraPaginate_("products.json", {}, "Product", (products) => {
         products.forEach((p) => {
+            if (String(p.deactivate) === "1") return; // e.g. "[ قديم ]"-prefixed retired products
             const name = p.name || p.product_name || "";
             const sku = p.product_code || p.sku || "";
             if (name.toLowerCase().includes(q) || sku.toLowerCase().includes(q)) {
@@ -308,6 +336,7 @@ function getAllProducts() {
     const products = [];
     daftraPaginate_("products.json", {}, "Product", (items) => {
         items.forEach((p) => {
+            if (String(p.deactivate) === "1") return; // e.g. "[ قديم ]"-prefixed retired products
             products.push({ id: p.id, name: p.name || p.product_name || "", sku: p.product_code || p.sku || "" });
         });
     });
