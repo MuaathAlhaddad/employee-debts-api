@@ -170,6 +170,16 @@ function appendDebtLogEntry_(sheet, row, values, actor, note) {
     sheet.getRange(row, 12).setValue(JSON.stringify(log)); // Log
 }
 
+// Stamps Last Follow Up (drives the "Today" chase-list filter) WITHOUT
+// also writing a text note into the Log column -- used for Short debtor
+// money events, which already get a proper structured row in Short
+// Debtor Transactions (owner's request, 2026-09-01: don't record the
+// same payment/debt-added event twice, once as free text here and once
+// as a clean row there).
+function touchLastFollowUp_(sheet, row) {
+    sheet.getRange(row, 10).setValue(todayStr_());
+}
+
 // Logs a plain follow-up note ("chased today") without changing amount,
 // status, or due date. Edit-role only.
 function addDebtFollowUp(employeeName, employeePin, clientId, note) {
@@ -206,16 +216,20 @@ function recordDebtPayment(employeeName, employeePin, clientId, amount) {
 
     sheet.getRange(row, 5).setValue(newPaid); // Amount Paid
 
-    let note = `Payment received: ${applied} (remaining ${newRemaining})`;
-
     if (newRemaining <= 0) {
         sheet.getRange(row, 6).setValue(CONFIG.DEBT_STATUS.PAID); // Status
-        note += " -- fully paid";
     }
 
-    appendDebtLogEntry_(sheet, row, values, employee.name, note);
+    // Short debtors get a proper structured row in Short Debtor
+    // Transactions instead of a text note here -- recording the same
+    // payment in both places would just be a duplicate (owner's request,
+    // 2026-09-01). Still stamps Last Follow Up either way, since that's
+    // what drives the "Today" chase-list filter regardless of type.
     if (values[2] === "Short") {
+        touchLastFollowUp_(sheet, row);
         logShortTransaction_(clientId, values[0], "payment", -applied, newRemaining, employee.name, "");
+    } else {
+        appendDebtLogEntry_(sheet, row, values, employee.name, `Payment received: ${applied} (remaining ${newRemaining})`);
     }
 
     return { success: true };
@@ -441,13 +455,9 @@ function addToShortDebt(employeeName, employeePin, clientId, amount, note, credi
     // leaves whatever creditor was already on file untouched.
     if (creditor) sheet.getRange(row, 14).setValue(String(creditor).trim());
 
-    appendDebtLogEntry_(
-        sheet,
-        row,
-        values,
-        employee.name,
-        `Additional debt: +${amt} (new total ${newOwed})${note ? " -- " + note : ""}`,
-    );
+    // A proper structured row in Short Debtor Transactions instead of a
+    // text note here too -- see recordDebtPayment()'s comment above.
+    touchLastFollowUp_(sheet, row);
     logShortTransaction_(clientId, values[0], "debt_added", amt, newOwed - (Number(values[4]) || 0), employee.name, note || "");
 
     return { success: true };
