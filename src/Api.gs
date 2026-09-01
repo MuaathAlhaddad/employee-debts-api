@@ -33,6 +33,9 @@ const API_ACTIONS = {
     rescheduleDebtDueDate,
     setDebtStatus,
     addShortDebt,
+    addToShortDebt,
+    editShortDebt,
+    getShortDebtorTransactions,
     refreshDebtsFromApp,
     getDebtsReviewLog,
     toggleDebtReviewEntry,
@@ -40,10 +43,18 @@ const API_ACTIONS = {
     // Long Debtor account (real Daftra data/writes)
     getLongDebtorAccount,
     addLongDebtorPayment,
+    addLongDebtorInvoice,
+    editLongDebtorPayment,
+    editLongDebtorInvoice,
+    toggleReconciliationFlag,
 
     // Product search
     searchProducts,
     getProductPurchaseHistory,
+
+    // Smoke tests -- see README.md. Self-cleaning writes against the two
+    // designated test clients only -- NEVER call with a real client_id.
+    runSmokeTests,
 
     // Offline sync
     syncBundle,

@@ -12,5 +12,5 @@ function searchProducts(employeeName, employeePin, query) {
 function getProductPurchaseHistory(employeeName, employeePin, productId) {
     authenticateEmployee(employeeName, employeePin);
 
-    return getDaftraProductPurchaseHistory(productId);
+    return getDaftraProductPurchaseHistoryCached_(productId);
 }

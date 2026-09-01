@@ -13,7 +13,11 @@ const CONFIG = {
     SHEETS: {
         EMPLOYEES: "Employees",
         DEBTS: "Debts Snapshot",
+        SHORT_DEBTS_BACKUP: "Short Debtors Backup",
+        SHORT_TRANSACTIONS: "Short Debtor Transactions",
         DEBTS_REVIEW: "Debts Review Log",
+        PRODUCTS_CACHE: "Products Cache",
+        PRODUCT_PRICE_CACHE: "Product Price Cache",
     },
 
     DEBT_STATUS: {
@@ -25,4 +29,9 @@ const CONFIG = {
     // A Short Debtor open this many days without being closed or created
     // as a real Daftra invoice gets flagged in the app.
     SHORT_DEBTOR_AGING_DAYS: 3,
+
+    // How long a cached product purchase-price lookup stays trusted before
+    // it's treated as stale and re-fetched live -- see
+    // getDaftraProductPurchaseHistoryCached_() in Daftra.gs.
+    PRODUCT_PRICE_CACHE_MAX_AGE_DAYS: 7,
 };

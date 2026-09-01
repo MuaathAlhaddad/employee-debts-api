@@ -91,12 +91,80 @@ function daftraPost_(path, payload) {
     const body = response.getContentText();
 
     if (code < 200 || code >= 300) {
+        // The top-level "message" is a generic "please fix the errors
+        // below" -- the actual per-field reason lives in
+        // "validation_errors" (confirmed 2026-08-25 against a real
+        // rejected invoice in the main sales-tracker project's Bulk
+        // Invoice tool, same Daftra account/API). Pull it out explicitly
+        // rather than dumping the whole raw body.
+        let detail = body;
+        try {
+            const parsed = JSON.parse(body);
+            if (parsed && parsed.validation_errors) {
+                detail = JSON.stringify(parsed.validation_errors);
+            }
+        } catch (e) {
+            // Not JSON -- fall back to the raw body below.
+        }
+
         throw new Error(
-            `Daftra API error ${code} on POST ${path}: ${body.slice(0, 300)}`,
+            `Daftra API error ${code} on POST ${path}: ${detail.slice(0, 1000)}`,
         );
     }
 
     return JSON.parse(body);
+}
+
+// PUT counterpart of daftraPost_ -- for editing an existing resource.
+// Confirmed working 2026-08-31 via a real edit-and-restore test (see
+// editDaftraClientPayment_/editDaftraDueInvoice_ below) -- Daftra's api2
+// docs don't document update endpoints the way they document
+// create/list ones, and it does a FULL REPLACE, not a partial patch: any
+// field left out of the payload gets reset to a default rather than left
+// alone. Every caller here must read the current record first and carry
+// every meaningful field forward unchanged except what's actually being
+// corrected.
+function daftraPut_(path, payload) {
+    const { subdomain, apiKey } = getDaftraConfig_();
+
+    const url = `https://${subdomain}.daftra.com/api2/${path}`;
+
+    const response = UrlFetchApp.fetch(url, {
+        method: "put",
+        contentType: "application/json",
+        payload: JSON.stringify(payload),
+        headers: {
+            APIKEY: apiKey,
+            Accept: "application/json",
+        },
+        muteHttpExceptions: true,
+    });
+
+    const code = response.getResponseCode();
+    const body = response.getContentText();
+
+    return { code, body };
+}
+
+// DELETE counterpart -- lets the smoke-test suite (Tests.gs) clean up
+// after itself instead of accumulating throwaway rows on the designated
+// test client. Confirmed working 2026-09-01 for both invoices.json and
+// client_payments.json against real (test-client) records.
+function daftraDelete_(path) {
+    const { subdomain, apiKey } = getDaftraConfig_();
+
+    const url = `https://${subdomain}.daftra.com/api2/${path}`;
+
+    const response = UrlFetchApp.fetch(url, {
+        method: "delete",
+        headers: {
+            APIKEY: apiKey,
+            Accept: "application/json",
+        },
+        muteHttpExceptions: true,
+    });
+
+    return { code: response.getResponseCode(), body: response.getContentText() };
 }
 
 // Daftra's list endpoints aren't 100% consistent about the wrapper key
@@ -166,15 +234,41 @@ function daftraPaginate_(path, params, unwrapKey, onPage) {
 // confirmed 2026-08-22 against a real account) -- invoices.json doesn't
 // carry that flag on its embedded client fields, so this is a second,
 // separate paginated fetch, done once per refresh and cached in the map
-// below rather than per-invoice.
-function getSuspendedClientIds_() {
-    const suspended = {};
+// below rather than per-invoice. Also the authoritative source for phone
+// now (confirmed 2026-08-28): the invoice-embedded guess below
+// (client_phone1/client_phone/client_mobile) never covered "phone2",
+// which is where this account's clients actually have their number on
+// file more often than not (confirmed directly against a real client's
+// edit form -- phone1 was empty, phone2 had the real number). Reading
+// straight off the Client resource is also just more correct than
+// hoping an invoice happens to embed it.
+// A client's balance can also be adjusted through a manual Daftra
+// "Journal Entry" (double-entry ledger adjustment, e.g. Reports > General
+// Accounts > Journals) rather than an invoice or payment -- deliberately
+// NOT accounted for here. Investigated 2026-08-29: journals.json is a
+// real, working API endpoint (confirmed against a real entry), but each
+// entry only references a journal_account_id (an internal chart-of-
+// accounts id), not a client_id, so mapping one back to a specific client
+// would need a further, unconfirmed API layer -- and this account has
+// 42,000+ journal entries total, which is far too many to scan on every
+// refresh regardless. If a client's balance is ever off after a manual
+// journal entry, prefer recording that adjustment as an "Add invoice" on
+// their card instead (a real Daftra invoice, which this DOES read
+// correctly) -- a one-off correction can be applied by hand.
+function getClientMetadata_() {
+    const metadata = {};
     daftraPaginate_("clients.json", {}, "Client", (clients) => {
         clients.forEach((c) => {
-            if (String(c.suspend) === "1") suspended[c.id] = true;
+            metadata[c.id] = {
+                suspended: String(c.suspend) === "1",
+                // String() -- Daftra sometimes hands these back as
+                // numbers, not strings, and downstream code assumes a
+                // string (.replace(), etc).
+                phone: String(c.phone2 || c.phone1 || c.mobile || c.phone || ""),
+            };
         });
     });
-    return suspended;
+    return metadata;
 }
 
 function getDaftraOutstandingDebts() {
@@ -190,10 +284,10 @@ function getDaftraOutstandingDebts() {
                 inv.client_business_name ||
                 [inv.client_first_name, inv.client_last_name].filter(Boolean).join(" ") ||
                 "Client #" + id;
-            // String() -- Daftra sometimes hands this back as a number,
-            // not a string (confirmed 2026-08-22 against a real account),
-            // and downstream code assumes a string (.replace(), etc).
-            const phone = String(inv.client_phone1 || inv.client_phone || inv.client_mobile || "");
+            // Fallback only -- getClientMetadata_() below is the real
+            // source now. Kept in case an invoice-embedded phone is ever
+            // present for a client the metadata pass somehow missed.
+            const phone = String(inv.client_phone2 || inv.client_phone1 || inv.client_phone || inv.client_mobile || "");
 
             if (!balances[id]) {
                 balances[id] = { clientId: id, clientName: name, amount: 0, phone };
@@ -203,10 +297,35 @@ function getDaftraOutstandingDebts() {
         });
     });
 
-    const suspended = getSuspendedClientIds_();
+    // REVERTED 2026-08-30 -- this used to also subtract a second,
+    // full-account pass over client_payments.json here, added 2026-08-29
+    // on the theory that summary_unpaid never reflects a payment credited
+    // straight to the account (client 404: summing summary_unpaid gave
+    // 309, but Daftra's own page said 328). That theory was wrong.
+    // Checked both clients directly against their live Daftra pages
+    // today: client 209 has 19,549 in direct client_payments against
+    // 6,907 in currently-open invoices -- Daftra's own "Amount Due" is
+    // 6,907, i.e. NOT netted against those payments, confirming Daftra
+    // applies a client_payment into the relevant invoice's summary_unpaid
+    // itself (already verified live in an earlier real test-payment check
+    // on client 493 -- the balance moved immediately). The subtraction
+    // was double-counting that, which had been silently corrupting every
+    // Long debtor's balance for a day, in client 209's case hiding a real
+    // 6,907 SAR debt entirely (amount went negative -> filtered out
+    // below). Client 404's real page today is 328, vs this function's
+    // 309 -- an 19 SAR gap, not the 100 the original theory blamed on a
+    // manual journal entry, but still much closer than the netted 228 was
+    // -- that gap is exactly what the manual "needs reconciliation" flag
+    // (client 404 already has it set) exists to cover by hand.
+    const metadata = getClientMetadata_();
 
     return Object.values(balances)
-        .filter((d) => !suspended[d.clientId])
+        .filter((d) => d.amount > 0)
+        .filter((d) => !(metadata[d.clientId] && metadata[d.clientId].suspended))
+        .map((d) => {
+            const clientPhone = metadata[d.clientId] && metadata[d.clientId].phone;
+            return clientPhone ? Object.assign({}, d, { phone: clientPhone }) : d;
+        })
         .sort((a, b) => b.amount - a.amount);
 }
 
@@ -215,68 +334,122 @@ function getDaftraOutstandingDebts() {
 // payment, since Daftra has no single "client statement" API endpoint
 // (confirmed by research; statements/aged-ledger are web-report-only).
 //
-// Scoped to the last 30 days only (owner's call, 2026-08-22): showing
-// full history was both slow (20-30+ seconds for an active client,
-// scanning everything) and not what's actually wanted day to day. The
-// headline "Balance" the app shows is the debtor's already-known total
+// Shows the last 5 records by COUNT, not a date window -- a 30-day
+// window (the original design) went empty for any client who'd simply
+// gone quiet for over a month, which is common enough here that the
+// owner asked for record-count-based recency instead (2026-08-26). The
+// headline "Balance" the app shows stays the debtor's already-known total
 // (from the Debts Snapshot / getDaftraOutstandingDebts, computed off
-// Daftra's summary_unpaid) -- NOT recomputed from this partial window,
-// since a running total over just 30 days would be a confusingly wrong
-// number for any debt older than that.
+// Daftra's summary_unpaid) -- NOT recomputed from this list, since these
+// are just the 5 most recent entries, not a full running total.
 // ============================================================
 
+// Daftra stamps its own running account balance onto extra_details at
+// the moment each invoice/payment is written (confirmed 2026-08-30 while
+// investigating the client_payments-subtraction bug) -- shown here
+// purely as read-only context alongside each entry (like a bank
+// statement's running-balance column), never used in any of this app's
+// own balance math.
+function daftraEntryRunningBalance_(item) {
+    try {
+        const parsed = JSON.parse(item.extra_details || "{}");
+        return parsed.client_balance != null ? Number(parsed.client_balance) : null;
+    } catch (e) {
+        return null;
+    }
+}
+
 function getDaftraClientStatement(clientId) {
-    const entries = []; // { date, type, description, amount }
-    const from = Utilities.formatDate(addDays_(new Date(), -30), Session.getScriptTimeZone(), "yyyy-MM-dd");
+    const entries = []; // { date, type, description, amount, remaining }
 
-    daftraPaginate_("invoices.json", { client_id: clientId, date_from: from }, "Invoice", (invoices) => {
-        invoices.forEach((inv) => {
-            entries.push({
-                date: inv.date || inv.created,
-                type: "invoice",
-                description: `Invoice #${inv.no || inv.id}`,
-                amount: Number(inv.summary_total) || 0,
-            });
+    fetchDaftraRecentEntries_("invoices.json", { client_id: clientId }, "Invoice").forEach((inv) => {
+        entries.push({
+            id: inv.id,
+            date: inv.date || inv.created,
+            type: "invoice",
+            description: `Invoice #${inv.no || inv.id}`,
+            amount: Number(inv.summary_total) || 0,
+            remaining: daftraEntryRunningBalance_(inv),
         });
     });
 
-    daftraPaginate_("invoice_payments.json", { client_id: clientId, date_from: from }, "InvoicePayment", (payments) => {
-        payments.forEach((p) => {
-            entries.push({
-                date: p.date,
-                type: "invoice_payment",
-                description: `Payment on invoice #${p.invoice_id}`,
-                amount: -(Number(p.amount) || 0),
-            });
+    // "invoice_payment" and "client_payment" are the same underlying
+    // Daftra record under two different API resource names (confirmed
+    // 2026-08-31) -- both edit the same way, via editDaftraClientPayment_.
+    fetchDaftraRecentEntries_("invoice_payments.json", { client_id: clientId }, "InvoicePayment").forEach((p) => {
+        entries.push({
+            id: p.id,
+            date: p.date,
+            type: "invoice_payment",
+            description: `Payment on invoice #${p.invoice_id}`,
+            amount: -(Number(p.amount) || 0),
+            remaining: daftraEntryRunningBalance_(p),
         });
     });
 
-    daftraPaginate_("client_payments.json", { client_id: clientId, date_from: from }, "ClientPayment", (payments) => {
-        payments.forEach((p) => {
-            entries.push({
-                date: p.date,
-                type: "client_payment",
-                description: p.notes || "Account payment",
-                amount: -(Number(p.amount) || 0),
-            });
+    fetchDaftraRecentEntries_("client_payments.json", { client_id: clientId }, "ClientPayment").forEach((p) => {
+        entries.push({
+            id: p.id,
+            date: p.date,
+            type: "client_payment",
+            description: p.notes || "Account payment",
+            amount: -(Number(p.amount) || 0),
+            remaining: daftraEntryRunningBalance_(p),
         });
     });
 
     entries.sort((a, b) => new Date(b.date) - new Date(a.date));
 
-    return { entries, periodDays: 30 };
+    return { entries: entries.slice(0, 5) };
 }
 
-function addDays_(date, n) {
-    const d = new Date(date);
-    d.setDate(d.getDate() + n);
-    return d;
+// Fetches just the TAIL of a client-filtered, paginated Daftra list --
+// the last 2 pages, not a client's entire history -- since this account's
+// list endpoints are consistently oldest-first (confirmed via
+// stock_transactions.json, 2026-08-21), so the most recent activity sits
+// at the END of the pagination. A single client here can have thousands
+// of records (one has 2,680 invoices), so scanning everything just to
+// find the 5 newest would reintroduce the exact 20-30+ second slowness
+// this account statement was already fixed once for. Bounded to at most
+// 2 requests regardless of how much history the client has.
+function fetchDaftraRecentEntries_(path, params, unwrapKey) {
+    const limit = 100;
+    const first = daftraGet_(path, Object.assign({}, params, { page: 1, limit }));
+    const firstItems = daftraExtractList_(first).map((item) => daftraUnwrap_(item, unwrapKey));
+
+    const pageCount = first && first.pagination && Number(first.pagination.page_count);
+    if (!pageCount || pageCount <= 1) return firstItems;
+
+    const items = [];
+    [pageCount - 1, pageCount].forEach((page) => {
+        if (page < 1) return;
+        const payload = page === 1 ? first : daftraGet_(path, Object.assign({}, params, { page, limit }));
+        daftraExtractList_(payload)
+            .map((item) => daftraUnwrap_(item, unwrapKey))
+            .forEach((item) => items.push(item));
+    });
+
+    return items;
 }
 
 // Records a payment directly to a client's account (not tied to one
-// invoice) -- what "Add payment" in the app calls. See the header comment
-// about verifying this against a real, small, verifiable payment before
-// trusting it in daily use.
+// invoice) -- what "Add payment" in the app calls.
+//
+// The original guess ({ClientPayment: {client_id, amount, date, notes}})
+// was missing THREE required fields, confirmed one at a time against a
+// real test client (id 493) on 2026-08-28:
+//   - treasury_id (which cash/bank account the money lands in) and
+//     payment_method -- without these Daftra returned a "successful"
+//     202 response with id:null and created nothing at all (not even a
+//     pending record).
+//   - status -- without this the payment record WAS created (a real id,
+//     correctly linked to the client) but sat in a "تأكيد الدفع"/Confirm
+//     Payment pending state forever and never counted toward the
+//     client's balance. 1 = "مكتمل" (Complete).
+// All three field names/values came directly from Daftra's own "Add
+// payment credit" web form (client page), not guessed. treasury_id 1 =
+// "الخزينة الاساسية" (Main Treasury) -- reasonable default for a cash
+// payment collected by an employee.
 function addDaftraClientPayment(clientId, amount, note) {
     const payload = {
         ClientPayment: {
@@ -284,10 +457,207 @@ function addDaftraClientPayment(clientId, amount, note) {
             amount: amount,
             date: Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd"),
             notes: note || "",
+            treasury_id: 1,
+            payment_method: "cash",
+            // Without this the payment is created but sits in a pending
+            // "needs confirmation" state and never counts toward the
+            // client's balance -- confirmed 2026-08-28 (a test payment
+            // with no status showed a "تأكيد الدفع"/Confirm Payment button
+            // and the balance never moved). 1 = "مكتمل" (Complete).
+            status: 1,
+            // Leaving this out made the payment land in a separate,
+            // un-aggregated currency line on the client's account instead
+            // of merging into the main SAR balance (confirmed 2026-08-28:
+            // the payment counted, but a second "-1.00" summary row
+            // appeared next to the real one instead of the total
+            // decreasing). This account only uses SAR.
+            currency_code: "SAR",
         },
     };
 
     return daftraPost_("client_payments.json", payload);
+}
+
+// Corrects the amount on an EXISTING Long Debtor payment, in Daftra
+// itself -- owner's request, 2026-08-31. Covers both the "invoice_
+// payment" and "client_payment" entries the account statement shows;
+// confirmed 2026-08-31 (comparing the web UI's own edit form against both
+// API resource names) they're the same underlying record, just exposed
+// under two different API model-name wrappers, so client_payments/{id}
+// .json works for either.
+//
+// Daftra's PUT here does a full replace, not a partial patch -- any field
+// left out of the payload gets reset to a default rather than left alone
+// (confirmed via a real edit-and-restore test against a throwaway test
+// payment: an amount-only PUT silently wiped the payment's date to today
+// and its staff attribution). So this always reads the current record
+// first and carries every meaningful field forward unchanged except the
+// amount being corrected.
+function editDaftraClientPayment_(paymentId, clientId, newAmount) {
+    // A single-resource GET comes back as {result, code, data:
+    // {ClientPayment: {...}}} -- daftraUnwrap_ only handles the LIST
+    // shape (each item's own model-name key), not this envelope, so this
+    // reaches directly into .data instead.
+    const current = daftraGet_(`client_payments/${paymentId}.json`, {});
+    const p = current && current.data && current.data.ClientPayment;
+
+    if (!p || !p.id) {
+        throw new Error("That payment couldn't be found in Daftra.");
+    }
+    if (String(p.client_id) !== String(clientId)) {
+        throw new Error("That payment doesn't belong to this client -- refresh and try again.");
+    }
+
+    const dateOnly = String(p.date || "").split(" ")[0];
+
+    return daftraPut_(`client_payments/${paymentId}.json`, {
+        ClientPayment: {
+            amount: newAmount,
+            date: dateOnly,
+            payment_method: p.payment_method || "cash",
+            treasury_id: p.treasury_id || 1,
+            status: p.status || 1,
+            currency_code: p.currency_code || "SAR",
+            notes: p.notes || "",
+        },
+    });
+}
+
+// ============================================================
+// "Add invoice" -- creates a real Daftra due invoice against a Long
+// Debtor's account (the Daftra-side counterpart to addDaftraClientPayment
+// above). Every customer-debt invoice in this shop is recorded against
+// this one fixed service instead of itemizing real products -- id
+// confirmed directly from the product's own Daftra page
+// (https://muaath20002024.daftra.com/owner/products/view/1615), the same
+// service id the Bulk Invoice tool in the main sales-tracker project uses
+// (src/GS/BulkInvoice.gs there).
+// ============================================================
+
+const DUE_INVOICE_SERVICE_ID = 1615;
+const DUE_INVOICE_SERVICE_NAME = "فاتورة مستحقة";
+
+function createDaftraDueInvoice_(clientId, amount, note) {
+    const today = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
+
+    const invoiceFields = {
+        client_id: clientId,
+        date: today,
+        issue_date: today,
+        draft: 0,
+        // Always sent, even when not required -- Daftra rejects invoice
+        // creation outright for a client whose "invoicing method" is set
+        // to Email if this is missing (confirmed 2026-08-25, same Daftra
+        // account, via the Bulk Invoice tool). ".invalid" is the domain
+        // suffix RFC 2606 reserves for addresses that are never meant to
+        // be real/deliverable.
+        client_email: `client${clientId}@placeholder.invalid`,
+    };
+
+    const item = {
+        item: note ? `${DUE_INVOICE_SERVICE_NAME} -- ${note}` : DUE_INVOICE_SERVICE_NAME,
+        quantity: 1,
+        unit_price: Number(amount) || 0,
+        product_id: DUE_INVOICE_SERVICE_ID,
+    };
+
+    const result = daftraPost_("invoices.json", { Invoice: invoiceFields, InvoiceItem: [item] });
+    const invoice = daftraUnwrap_(result, "Invoice") || result;
+
+    return { id: invoice.id, no: invoice.no || invoice.invoice_number || invoice.id };
+}
+
+// Corrects the amount on an EXISTING Long Debtor invoice, in Daftra
+// itself -- owner's request, 2026-08-31. Only handles the simple,
+// single-line-item "due invoice" shape createDaftraDueInvoice_() above
+// creates (every invoice this app writes looks like that) -- refuses
+// anything else rather than guessing at a more complex invoice's
+// structure.
+//
+// Same full-replace risk as editDaftraClientPayment_() above, confirmed
+// worse here in real testing: an edit that only sent the changed
+// unit_price silently reassigned the invoice to a brand new sequential
+// invoice NUMBER and reset both dates to 01/01/1970. Explicitly carrying
+// forward no/date/issue_date/due_after (Invoice) and
+// id/item/product_id/tax1/store_id (InvoiceItem), changing only
+// unit_price, fixed that in the same test -- restoring the original
+// number and dates exactly. Also refuses to touch an invoice already
+// submitted to e-invoicing (ZATCA) -- Saudi e-invoicing rules require a
+// credit note for a correction after submission, not a silent edit.
+function editDaftraDueInvoice_(invoiceId, clientId, newAmount) {
+    // See editDaftraClientPayment_()'s comment -- same envelope shape.
+    const current = daftraGet_(`invoices/${invoiceId}.json`, {});
+    const inv = current && current.data && current.data.Invoice;
+
+    if (!inv || !inv.id) {
+        throw new Error("That invoice couldn't be found in Daftra.");
+    }
+    if (String(inv.client_id) !== String(clientId)) {
+        throw new Error("That invoice doesn't belong to this client -- refresh and try again.");
+    }
+    if (inv.e_invoice_status) {
+        throw new Error(
+            "This invoice was already submitted to e-invoicing (ZATCA) -- it can't be silently edited. " +
+                "Record a credit note in Daftra instead.",
+        );
+    }
+
+    const items = inv.InvoiceItem || [];
+    if (items.length !== 1 || String(items[0].product_id) !== String(DUE_INVOICE_SERVICE_ID)) {
+        throw new Error(
+            "This invoice isn't a simple due-invoice this app can edit -- correct it directly in Daftra instead.",
+        );
+    }
+
+    const item = items[0];
+    // date/issue_date come back as "dd/mm/yyyy" on the invoice detail
+    // (unlike a payment's "yyyy-mm-dd hh:mm:ss") -- convert before
+    // sending back, since the create path always sends "yyyy-MM-dd".
+    const toIso = (d) => {
+        const parts = String(d || "").split("/");
+        return parts.length === 3 ? `${parts[2]}-${parts[1]}-${parts[0]}` : d;
+    };
+
+    return daftraPut_(`invoices/${invoiceId}.json`, {
+        Invoice: {
+            id: inv.id,
+            client_id: inv.client_id,
+            no: inv.no,
+            date: toIso(inv.date),
+            issue_date: toIso(inv.issue_date),
+            due_after: inv.due_after || 0,
+        },
+        InvoiceItem: [
+            {
+                id: item.id,
+                item: item.item,
+                quantity: item.quantity || 1,
+                unit_price: newAmount,
+                product_id: item.product_id,
+                tax1: item.tax1 || null,
+                store_id: item.store_id || 1,
+            },
+        ],
+    });
+}
+
+// Sum of summary_unpaid across just ONE client's invoices. Used right
+// after createDaftraDueInvoice_()/addDaftraClientPayment() to refresh
+// that single row's balance in the Debts Snapshot sheet without paying
+// for a full refreshDebtsSnapshot() (which re-scans the whole account).
+// See getDaftraOutstandingDebts()'s comment above -- no longer subtracts
+// client_payments.json here either, for the same reason (double-counts a
+// reduction Daftra already applies into summary_unpaid itself).
+function getSingleClientBalance_(clientId) {
+    let total = 0;
+
+    daftraPaginate_("invoices.json", { client_id: clientId }, "Invoice", (invoices) => {
+        invoices.forEach((inv) => {
+            total += Number(inv.summary_unpaid) || 0;
+        });
+    });
+
+    return Math.max(0, total);
 }
 
 // ============================================================
@@ -332,15 +702,80 @@ function searchDaftraProducts(query) {
 // 56,000+ stock_transactions rows). This is what the offline sync bundle
 // uses so Product Search can match by name/SKU from the local cache
 // without a live connection; viewing a specific product's price needs one.
+//
+// Reads from the "Products Cache" sheet rather than paginating Daftra live
+// -- with 1,500+ products that was ~16 sequential Daftra API calls on
+// EVERY sync (every app open / "Sync now" tap), which is what made the app
+// feel slow (2026-08-25). The cache is refreshed by
+// refreshProductsCache(), piggybacked on the existing "Refresh from
+// Daftra" button. Falls back to a live fetch if the cache is empty (e.g.
+// the very first run before anyone has hit refresh) so this never just
+// returns nothing.
 function getAllProducts() {
+    const sheet = getSheet_().getSheetByName(CONFIG.SHEETS.PRODUCTS_CACHE);
+    const lastRow = sheet && sheet.getLastRow();
+
+    if (!sheet || lastRow < 2) {
+        return fetchAllProductsFromDaftra_();
+    }
+
+    return sheet
+        .getRange(2, 1, lastRow - 1, 3)
+        .getValues()
+        .filter((row) => row[0] !== "" && row[0] != null)
+        // Sheets hands back a numeric-looking cell (a common SKU shape,
+        // e.g. "2038") as a JS number, not a string -- confirmed
+        // 2026-08-26 as the cause of product search crashing outright on
+        // .toLowerCase() client-side. String() everything read from a
+        // sheet cell, not just SKU, since the same trap applies to any of
+        // them.
+        .map((row) => ({ id: row[0], name: String(row[1] || ""), sku: String(row[2] || "") }));
+}
+
+// Live pagination through Daftra's product catalog -- see getAllProducts()
+// for why this is cached rather than called on every sync.
+function fetchAllProductsFromDaftra_() {
     const products = [];
     daftraPaginate_("products.json", {}, "Product", (items) => {
         items.forEach((p) => {
             if (String(p.deactivate) === "1") return; // e.g. "[ قديم ]"-prefixed retired products
-            products.push({ id: p.id, name: p.name || p.product_name || "", sku: p.product_code || p.sku || "" });
+            products.push({
+                id: p.id,
+                name: String(p.name || p.product_name || ""),
+                sku: String(p.product_code || p.sku || ""),
+            });
         });
     });
     return products;
+}
+
+// Re-pulls the full product catalog from Daftra and overwrites the
+// "Products Cache" sheet -- called from refreshDebtsFromApp() so the
+// existing "Refresh from Daftra" button keeps both debtor balances and the
+// product catalog current in one tap.
+function refreshProductsCache() {
+    const products = fetchAllProductsFromDaftra_();
+
+    const ss = getSheet_();
+    let sheet = ss.getSheetByName(CONFIG.SHEETS.PRODUCTS_CACHE);
+
+    if (!sheet) {
+        sheet = ss.insertSheet(CONFIG.SHEETS.PRODUCTS_CACHE);
+    }
+
+    sheet.clear();
+    sheet.getRange(1, 1, 1, 3).setValues([["Product ID", "Name", "SKU"]]).setFontWeight("bold");
+
+    if (products.length > 0) {
+        sheet
+            .getRange(2, 1, products.length, 3)
+            .setValues(products.map((p) => [p.id, p.name, p.sku]));
+    }
+
+    sheet.autoResizeColumns(1, 3);
+    sheet.setFrozenRows(1);
+
+    return { productCount: products.length };
 }
 
 // Last 3 purchases for one product: date, supplier name, purchase price.
@@ -418,6 +853,79 @@ function getDaftraProductPurchaseHistory(productId) {
 }
 
 // ============================================================
+// Product price cache -- getDaftraProductPurchaseHistory() above is a
+// real, slow live Daftra lookup (a stock_transactions scan across up to
+// 80 pages, then a purchase-invoice detail fetch per match). There's no
+// practical way to pre-compute this for the WHOLE catalog upfront (this
+// account alone has 56,000+ stock_transactions rows -- see that
+// function's header comment), so instead each product's result is cached
+// the FIRST time anyone looks it up. Every search after that -- from any
+// employee, any device -- reads a sheet row instead of repeating the
+// slow scan (owner's request, 2026-08-27: "loading last price and
+// supplier is really slow, cache it"). Entries expire after
+// PRODUCT_PRICE_CACHE_MAX_AGE_DAYS so prices don't go stale forever.
+// ============================================================
+
+function getDaftraProductPurchaseHistoryCached_(productId) {
+    const cached = getCachedProductPurchaseHistory_(productId);
+    if (cached) return cached;
+
+    const history = getDaftraProductPurchaseHistory(productId);
+    setCachedProductPurchaseHistory_(productId, history);
+    return history;
+}
+
+function getCachedProductPurchaseHistory_(productId) {
+    const sheet = getSheet_().getSheetByName(CONFIG.SHEETS.PRODUCT_PRICE_CACHE);
+    const lastRow = sheet && sheet.getLastRow();
+    if (!sheet || lastRow < 2) return null;
+
+    const rows = sheet.getRange(2, 1, lastRow - 1, 3).getValues();
+
+    for (const row of rows) {
+        if (String(row[0]) !== String(productId)) continue;
+
+        const cachedAt = row[2];
+        const ageDays = cachedAt ? (Date.now() - new Date(cachedAt).getTime()) / 86400000 : Infinity;
+        if (ageDays > CONFIG.PRODUCT_PRICE_CACHE_MAX_AGE_DAYS) return null; // stale -- fall through to a live re-fetch
+
+        try {
+            return JSON.parse(row[1]);
+        } catch (e) {
+            return null; // corrupt cell -- treat as a miss rather than throwing
+        }
+    }
+
+    return null;
+}
+
+function setCachedProductPurchaseHistory_(productId, history) {
+    const ss = getSheet_();
+    let sheet = ss.getSheetByName(CONFIG.SHEETS.PRODUCT_PRICE_CACHE);
+
+    if (!sheet) {
+        sheet = ss.insertSheet(CONFIG.SHEETS.PRODUCT_PRICE_CACHE);
+        sheet.getRange(1, 1, 1, 3).setValues([["Product ID", "History JSON", "Cached At"]]).setFontWeight("bold");
+        sheet.setFrozenRows(1);
+    }
+
+    const lastRow = sheet.getLastRow();
+    const now = new Date();
+
+    if (lastRow >= 2) {
+        const ids = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+        for (let i = 0; i < ids.length; i++) {
+            if (String(ids[i][0]) === String(productId)) {
+                sheet.getRange(2 + i, 1, 1, 3).setValues([[productId, JSON.stringify(history), now]]);
+                return;
+            }
+        }
+    }
+
+    sheet.appendRow([productId, JSON.stringify(history), now]);
+}
+
+// ============================================================
 // "Debts Snapshot" sheet -- ported verbatim from the sales-tracker
 // project's Daftra.gs. Same sheet, same schema, same refresh behavior.
 // Two kinds of row share it:
@@ -448,6 +956,20 @@ const DEBTS_HEADERS = [
     "Promise Count",
     "Log",
     "Snapshot Time",
+    // Appended rather than inserted among the others (2026-08-25) so
+    // existing column-index reads elsewhere in this file/Debts.gs didn't
+    // all need renumbering. Who extended this debt on credit -- mainly
+    // meaningful for Short (notebook) debtors; Long debtors don't have a
+    // per-sale staff attribution in Daftra, so this is usually blank for
+    // them, just preserved across refreshes like the other follow-up
+    // fields in case an owner wants to set it there too.
+    "Creditor",
+    // Manual flag (owner's request, 2026-08-29): our balance calc has no
+    // way to detect a client whose Daftra balance includes a manual
+    // journal entry (see getClientMetadata_()'s header comment for why
+    // that can't be automated) -- this is a plain owner-set marker,
+    // shown as a warning tag on the card, cleared by hand once resolved.
+    "Needs Reconciliation",
 ];
 
 function refreshDebtsSnapshot() {
@@ -468,8 +990,40 @@ function refreshDebtsSnapshot() {
         lastRow >= 1
             ? sheet.getRange(1, 1, 1, DEBTS_HEADERS.length).getValues()[0]
             : [];
+    // A PREFIX match, not an exact one -- appending a new column to
+    // DEBTS_HEADERS (e.g. "Needs Reconciliation" on 2026-08-29) must not
+    // make this treat the on-disk sheet as a foreign layout, or the
+    // preserve-existing-rows block below gets skipped entirely and
+    // sheet.clear() wipes every hand-entered Short debtor (confirmed real
+    // data loss, 2026-08-29 -- exact-match check required identical
+    // length, so a single appended header column silently discarded the
+    // whole Short debtor list on the next refresh).
     const headerMatches =
-        JSON.stringify(currentHeaders) === JSON.stringify(DEBTS_HEADERS);
+        currentHeaders.length > 0 &&
+        currentHeaders.every((h, i) => h === DEBTS_HEADERS[i]);
+
+    // Fail loud instead of silently wiping -- if the on-disk header is
+    // neither a match nor a recognized prefix of DEBTS_HEADERS, this is an
+    // incompatible layout (e.g. a column got renamed/reordered, not just
+    // appended). Proceeding would clear() the sheet and rewrite only the
+    // Long/Daftra rows, discarding every Short debtor -- exactly what
+    // happened 2026-08-29. Whoever changes the header layout from here on
+    // must write a one-off migration and run it once so this check passes.
+    if (lastRow > 1 && currentHeaders.length > 0 && !headerMatches) {
+        throw new Error(
+            "Debts Snapshot header layout doesn't match DEBTS_HEADERS -- refusing to run " +
+                "refreshDebtsSnapshot to avoid silently wiping existing rows. Write a one-off " +
+                "migration for the new layout, run it once, then this will pass automatically.",
+        );
+    }
+
+    // Independent safety net, decoupled from the preserve logic above --
+    // mirrors whatever Short debtor rows are on disk right now into a
+    // separate backup sheet before anything here touches the main sheet.
+    // If a future bug (in this function or anywhere else) corrupts or
+    // drops Short debtors again, this tab is a same-spreadsheet recovery
+    // point that doesn't require digging through Sheets version history.
+    backupShortDebtRows_(sheet);
 
     if (headerMatches && lastRow > 1) {
         sheet
@@ -491,6 +1045,8 @@ function refreshDebtsSnapshot() {
                     lastFollowUp: row[9] || "",
                     promiseCount: row[10] || 0,
                     log: row[11] || "",
+                    creditor: row[13] || "",
+                    needsReconciliation: row[14] === true,
                 };
             });
     }
@@ -503,6 +1059,16 @@ function refreshDebtsSnapshot() {
         .getRange(1, 1, 1, DEBTS_HEADERS.length)
         .setValues([DEBTS_HEADERS])
         .setFontWeight("bold");
+
+    // Force the Phone column to plain text -- sheet.clear() above wipes
+    // any number format along with the content, and Sheets auto-converts
+    // a numeric-looking value (any phone starting with a country/area
+    // code like "9665...") to an actual number on write, silently
+    // dropping leading zeros (confirmed 2026-08-28: "00966537680173"
+    // came back as the number 966537680173). "@" is Sheets' plain-text
+    // format code. Applied to a generous row range since this runs
+    // before we know exactly how many rows will be written.
+    sheet.getRange(2, 7, 5000, 1).setNumberFormat("@");
 
     const longRows = debts.map((d) => {
         const prev = existingLong[d.clientId] || {};
@@ -537,6 +1103,8 @@ function refreshDebtsSnapshot() {
             prev.promiseCount || 0,
             log,
             now,
+            prev.creditor || "",
+            prev.needsReconciliation || false,
         ];
     });
 
@@ -557,6 +1125,45 @@ function refreshDebtsSnapshot() {
     );
 
     return { longCount: debts.length, longTotal: total, shortCount: shortRows.length };
+}
+
+// Mirrors whatever Short debtor rows currently exist in the Debts Snapshot
+// sheet into a separate "Short Debtors Backup" tab, overwriting it each
+// time. Called at the very start of refreshDebtsSnapshot(), before that
+// function touches the main sheet at all -- deliberately independent of
+// its preserve-existing-rows logic, so a future bug there doesn't take
+// this safety net down with it. Skips overwriting if it finds zero Short
+// rows, so a genuine bug that empties the main sheet doesn't also erase
+// the one copy that could recover from it.
+function backupShortDebtRows_(sheet) {
+    const lastRow = sheet.getLastRow();
+    if (lastRow <= 1) return;
+
+    const rows = sheet.getRange(2, 1, lastRow - 1, DEBTS_HEADERS.length).getValues();
+    const shortRows = rows.filter(
+        (row) => row[1] !== "" && row[1] != null && row[2] === "Short",
+    );
+
+    if (shortRows.length === 0) return;
+
+    const ss = getSheet_();
+    let backupSheet = ss.getSheetByName(CONFIG.SHEETS.SHORT_DEBTS_BACKUP);
+    if (!backupSheet) {
+        backupSheet = ss.insertSheet(CONFIG.SHEETS.SHORT_DEBTS_BACKUP);
+    }
+
+    backupSheet.clear();
+    backupSheet
+        .getRange(1, 1, 1, DEBTS_HEADERS.length)
+        .setValues([DEBTS_HEADERS])
+        .setFontWeight("bold");
+    backupSheet
+        .getRange(1, DEBTS_HEADERS.length + 2, 1, 1)
+        .setValue(`Backed up ${Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm")}`);
+    backupSheet.getRange(2, 7, shortRows.length, 1).setNumberFormat("@");
+    backupSheet.getRange(2, 1, shortRows.length, DEBTS_HEADERS.length).setValues(shortRows);
+    backupSheet.autoResizeColumns(1, DEBTS_HEADERS.length);
+    backupSheet.setFrozenRows(1);
 }
 
 function parseDebtLog_(raw) {
@@ -634,4 +1241,23 @@ function testRawPurchaseDetail(purchaseInvoiceId) {
 function testClientStatement(clientId) {
     const statement = getDaftraClientStatement(clientId);
     Logger.log("Statement for client %s: %s", clientId, JSON.stringify(statement, null, 2));
+}
+
+// One-off diagnostic for the "عميل جملة" (client 4) balance bug
+// (2026-08-25): the PWA showed 252,515 owed, but Daftra's own Aged Ledger
+// / account statement say 20.03. Confirmed by hand in the Daftra web UI
+// that invoice #008689 (site id 8773) for this client is a DRAFT
+// ("مسودة") worth ~252,515, with its payment later deleted -- theory is
+// getDaftraOutstandingDebts() sums summary_unpaid from EVERY invoice
+// invoices.json returns, including drafts, which Daftra's own reports
+// correctly exclude. This dumps the raw invoice object so we can see
+// which field actually marks it as a draft before writing the filter.
+function testDraftInvoiceIssue() {
+    daftraPaginate_("invoices.json", { client_id: 4 }, "Invoice", (invoices) => {
+        invoices.forEach((inv) => {
+            if (String(inv.no) === "008689" || Number(inv.summary_unpaid) > 100000) {
+                Logger.log("Found suspect invoice: %s", JSON.stringify(inv, null, 2));
+            }
+        });
+    });
 }

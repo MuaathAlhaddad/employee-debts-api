@@ -77,12 +77,25 @@ function rowToDebt_(row) {
         amount: Number(row[3]) || 0,
         amountPaid: Number(row[4]) || 0,
         status,
-        phone: row[6] || "",
+        // String() -- the Phone column is now formatted plain-text at the
+        // source (refreshDebtsSnapshot() in Daftra.gs) to stop Sheets
+        // auto-converting a numeric-looking phone into an actual number
+        // and dropping leading zeros, but this stays as a second line of
+        // defense for any row written before that fix.
+        phone: String(row[6] || ""),
         dueDate: normalizeDebtDate_(row[7]),
         dateGiven,
         lastFollowUp: normalizeDebtDate_(row[9]),
         promiseCount: Number(row[10]) || 0,
         log: parseDebtLog_(row[11]),
+        // Appended as the 14th column rather than inserted among the
+        // others (2026-08-25) -- existing rows written before this field
+        // existed just come back as "" here, same as any other blank cell.
+        creditor: row[13] || "",
+        // Owner-set marker (2026-08-29) -- our balance calc can't detect
+        // a Daftra journal-entry adjustment, so this is a manual flag
+        // instead, shown as a warning tag until cleared by hand.
+        needsReconciliation: row[14] === true,
         isAgingShort,
     };
 }
@@ -201,6 +214,9 @@ function recordDebtPayment(employeeName, employeePin, clientId, amount) {
     }
 
     appendDebtLogEntry_(sheet, row, values, employee.name, note);
+    if (values[2] === "Short") {
+        logShortTransaction_(clientId, values[0], "payment", -applied, newRemaining, employee.name, "");
+    }
 
     return { success: true };
 }
@@ -265,11 +281,40 @@ function setDebtStatus(employeeName, employeePin, clientId, status) {
     return { success: true };
 }
 
+// Case-insensitive name match against existing Short rows that are
+// already resolved (paid/dead) -- used by addShortDebt() so a repeat
+// debtor gets their same record reopened instead of a disconnected new
+// one, once they're back for a new debt (owner's request, 2026-08-25). An
+// ACTIVE Short row with the same name is deliberately NOT matched here --
+// that means they already have an open debt, which is worth a fresh row
+// (or the employee's judgment) rather than silently merging balances.
+function findResolvedShortDebtByName_(sheet, name) {
+    const lastRow = sheet.getLastRow();
+    if (lastRow <= 1) return null;
+
+    const q = name.toLowerCase();
+    const rows = sheet.getRange(2, 1, lastRow - 1, DEBTS_HEADERS.length).getValues();
+
+    for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        const resolved = row[5] === CONFIG.DEBT_STATUS.PAID || row[5] === CONFIG.DEBT_STATUS.DEAD;
+
+        if (row[2] === "Short" && resolved && String(row[0]).trim().toLowerCase() === q) {
+            return { row: 2 + i, values: row };
+        }
+    }
+
+    return null;
+}
+
 // Manually records a debtor from the separate notebook that never becomes
 // a Daftra invoice -- edit-role only. Unlike Long Debtors, this is the
 // ONLY way these rows get created or changed; refreshDebtsSnapshot() never
-// touches them.
-function addShortDebt(employeeName, employeePin, debtorName, amount, phone, dueDate, dateGiven, notes) {
+// touches them. If this name already has a paid-off/dead-debt Short row,
+// that SAME row is reopened (same Client ID, full log history kept) rather
+// than adding a new disconnected one -- otherwise a brand new row is
+// created as before.
+function addShortDebt(employeeName, employeePin, debtorName, amount, phone, dueDate, dateGiven, notes, creditor) {
     const employee = requireEditAccess_(employeeName, employeePin);
 
     const name = String(debtorName || "").trim();
@@ -286,14 +331,52 @@ function addShortDebt(employeeName, employeePin, debtorName, amount, phone, dueD
     const sheet = getDebtsSheet_();
     const now = new Date();
     const today = todayStr_();
-    const clientId = "S-" + Utilities.getUuid();
     const given = String(dateGiven || "").trim() || today;
     const due = String(dueDate || "").trim();
 
+    const existing = findResolvedShortDebtByName_(sheet, name);
+
     const openingNote =
-        "Debt recorded" +
+        (existing ? "New debt recorded (repeat debtor)" : "Debt recorded") +
         (notes ? ` -- ${String(notes).trim()}` : "") +
         (due ? ` -- due ${due}` : "");
+
+    if (existing) {
+        const clientId = String(existing.values[1]);
+        const log = parseDebtLog_(existing.values[11]);
+        log.push({
+            id: Utilities.getUuid(),
+            date: today,
+            time: now.toISOString(),
+            actor: employee.name,
+            note: openingNote,
+        });
+
+        sheet.getRange(existing.row, 1, 1, DEBTS_HEADERS.length).setValues([
+            [
+                name,
+                clientId,
+                "Short",
+                value,
+                0,
+                CONFIG.DEBT_STATUS.ACTIVE,
+                String(phone || "").trim() || existing.values[6] || "",
+                due,
+                given,
+                today,
+                0,
+                JSON.stringify(log),
+                now,
+                String(creditor || "").trim() || existing.values[13] || "",
+            ],
+        ]);
+
+        logShortTransaction_(clientId, name, "debt_added", value, value, employee.name, notes || "");
+
+        return { success: true, clientId, reopened: true };
+    }
+
+    const clientId = "S-" + Utilities.getUuid();
 
     const log = [
         {
@@ -319,18 +402,211 @@ function addShortDebt(employeeName, employeePin, debtorName, amount, phone, dueD
         0,
         JSON.stringify(log),
         now,
+        String(creditor || "").trim(),
     ]);
 
-    return { success: true, clientId };
+    logShortTransaction_(clientId, name, "debt_added", value, value, employee.name, notes || "");
+
+    return { success: true, clientId, reopened: false };
+}
+
+// Adds MORE debt to an EXISTING Short Debtor (the "Add invoice" button's
+// local-tracking counterpart to addLongDebtorInvoice below) -- e.g. they
+// borrow again while some/all of a previous debt is already on the books.
+// Increases Amount Owed on their existing row rather than creating a new
+// one, and reopens them if they'd been marked paid/dead. Edit-role only.
+function addToShortDebt(employeeName, employeePin, clientId, amount, note, creditor) {
+    const employee = requireEditAccess_(employeeName, employeePin);
+    const amt = Number(amount);
+
+    if (!amt || amt <= 0) {
+        throw new Error("Enter an amount greater than zero.");
+    }
+
+    const sheet = getDebtsSheet_();
+    const { row, values } = loadDebtRow_(sheet, clientId);
+
+    if (values[2] !== "Short") {
+        throw new Error("Add invoice only works this way for Short (notebook) debtors -- Long Debtors go through Daftra.");
+    }
+
+    const newOwed = (Number(values[3]) || 0) + amt;
+
+    sheet.getRange(row, 4).setValue(newOwed); // Amount Owed
+    sheet.getRange(row, 6).setValue(CONFIG.DEBT_STATUS.ACTIVE); // Status -- reopens if paid/dead
+
+    // Lets the owner reassign who's responsible for this debt each time
+    // more is added, not just at creation (owner's request, 2026-08-27).
+    // Only overwrites when a value was actually picked -- an empty string
+    // leaves whatever creditor was already on file untouched.
+    if (creditor) sheet.getRange(row, 14).setValue(String(creditor).trim());
+
+    appendDebtLogEntry_(
+        sheet,
+        row,
+        values,
+        employee.name,
+        `Additional debt: +${amt} (new total ${newOwed})${note ? " -- " + note : ""}`,
+    );
+    logShortTransaction_(clientId, values[0], "debt_added", amt, newOwed - (Number(values[4]) || 0), employee.name, note || "");
+
+    return { success: true };
+}
+
+// Directly overwrites a Short debtor's core fields -- unlike
+// addToShortDebt() above (which only ever adds MORE debt on top of what's
+// there), this corrects a mistake in what's already on the row: wrong
+// name, wrong amount owed, wrong amount already paid, wrong phone, wrong
+// dates, wrong creditor. Owner's request, 2026-08-30. Edit-role only.
+//
+// Short debtors have no per-transaction invoice/payment records (unlike
+// Long debtors, which are real Daftra invoices/payments) -- just a
+// running Amount Owed and Amount Paid on one row -- so "editing a mistyped
+// invoice or payment amount" for a Short debtor means correcting one of
+// these two totals directly, which is what amount/amountPaid do here.
+function editShortDebt(employeeName, employeePin, clientId, debtorName, amount, amountPaid, phone, dueDate, dateGiven, creditor) {
+    const employee = requireEditAccess_(employeeName, employeePin);
+
+    const name = String(debtorName || "").trim();
+    const owed = Number(amount);
+    const paid = Number(amountPaid);
+
+    if (!name) {
+        throw new Error("Enter who owes this money.");
+    }
+    if (!Number.isFinite(owed) || owed <= 0) {
+        throw new Error("Enter an amount owed greater than zero.");
+    }
+    if (!Number.isFinite(paid) || paid < 0) {
+        throw new Error("Amount paid can't be negative.");
+    }
+    if (paid > owed) {
+        throw new Error("Amount paid can't be more than the amount owed.");
+    }
+
+    const sheet = getDebtsSheet_();
+    const { row, values } = loadDebtRow_(sheet, clientId);
+
+    if (values[2] !== "Short") {
+        throw new Error("Only Short (notebook) debtors can be edited directly -- Long Debtors go through Daftra.");
+    }
+
+    const oldName = values[0];
+    const oldOwed = Number(values[3]) || 0;
+    const oldPaid = Number(values[4]) || 0;
+    const given = String(dateGiven || "").trim() || values[8] || "";
+    const due = String(dueDate || "").trim();
+
+    sheet.getRange(row, 1).setValue(name); // Client
+    sheet.getRange(row, 4).setValue(owed); // Amount Owed
+    sheet.getRange(row, 5).setValue(paid); // Amount Paid
+    sheet.getRange(row, 7).setValue(String(phone || "").trim()); // Phone
+    sheet.getRange(row, 8).setValue(due); // Due Date
+    sheet.getRange(row, 9).setValue(given); // Date Given
+    sheet.getRange(row, 14).setValue(String(creditor || "").trim()); // Creditor
+
+    // A resolved (paid/dead) row that no longer nets to zero after the
+    // edit is now genuinely open again -- same reopen convention
+    // addToShortDebt() already uses.
+    const currentStatus = values[5];
+    const stillOwesSomething = owed - paid > 0;
+    if (stillOwesSomething && currentStatus !== CONFIG.DEBT_STATUS.ACTIVE) {
+        sheet.getRange(row, 6).setValue(CONFIG.DEBT_STATUS.ACTIVE);
+    }
+
+    const changes = [];
+    if (oldName !== name) changes.push(`name "${oldName}" -> "${name}"`);
+    if (oldOwed !== owed) changes.push(`amount owed ${oldOwed} -> ${owed}`);
+    if (oldPaid !== paid) changes.push(`amount paid ${oldPaid} -> ${paid}`);
+
+    appendDebtLogEntry_(
+        sheet,
+        row,
+        values,
+        employee.name,
+        `Edited details${changes.length ? ": " + changes.join(", ") : " (no changes)"}`,
+    );
+
+    return { success: true };
+}
+
+// ============================================================
+// Short Debtor Transactions -- a clean, one-row-per-event ledger, kept
+// separate from the free-text log embedded in each Debts Snapshot row
+// (owner's request, 2026-08-31: wanted Short debtors' "Client account"
+// to read like Long debtors' real Daftra statement -- a bold amount plus
+// the running balance right after it -- which isn't possible to
+// reconstruct reliably from old free-text notes like "Payment received:
+// 180 (remaining 0) -- fully paid"). Only records real money movements
+// (debt added / payment received) -- edits, reopens, and status changes
+// stay in the free-text log only, same as before, since they're
+// corrections/bookkeeping rather than transactions. Starts empty --
+// existing history before this sheet existed is NOT backfilled.
+// ============================================================
+
+const SHORT_TX_HEADERS = ["Date", "Time", "Client ID", "Client Name", "Type", "Amount", "Remaining", "Actor", "Note"];
+
+function getShortTransactionsSheet_() {
+    const ss = getSheet_();
+    let sheet = ss.getSheetByName(CONFIG.SHEETS.SHORT_TRANSACTIONS);
+
+    if (!sheet) {
+        sheet = ss.insertSheet(CONFIG.SHEETS.SHORT_TRANSACTIONS);
+        sheet.getRange(1, 1, 1, SHORT_TX_HEADERS.length).setValues([SHORT_TX_HEADERS]).setFontWeight("bold");
+        sheet.setFrozenRows(1);
+    }
+
+    return sheet;
+}
+
+// amount is signed (+ debt added, - payment); remaining is the debtor's
+// Amount Owed minus Amount Paid immediately after this event.
+function logShortTransaction_(clientId, clientName, type, amount, remaining, actor, note) {
+    const sheet = getShortTransactionsSheet_();
+    const now = new Date();
+
+    sheet.appendRow([todayStr_(), now.toISOString(), clientId, clientName, type, amount, remaining, actor, note || ""]);
+}
+
+// Any logged-in employee can view -- matches getLongDebtorAccount()'s
+// access level (only the writes that create these rows are edit-gated).
+function getShortDebtorTransactions(employeeName, employeePin, clientId) {
+    authenticateEmployee(employeeName, employeePin);
+
+    const sheet = getShortTransactionsSheet_();
+    const lastRow = sheet.getLastRow();
+    if (lastRow <= 1) return { entries: [] };
+
+    const rows = sheet.getRange(2, 1, lastRow - 1, SHORT_TX_HEADERS.length).getValues();
+
+    const entries = rows
+        .filter((row) => String(row[2]) === String(clientId))
+        .map((row) => ({
+            id: null, // not individually editable -- these are local totals, not real Daftra records
+            date: row[1] || row[0],
+            type: row[4],
+            description: (row[4] === "payment" ? "Payment received" : "Debt added") + (row[8] ? ` -- ${row[8]}` : ""),
+            amount: Number(row[5]) || 0,
+            remaining: row[6] === "" ? null : Number(row[6]),
+        }))
+        .sort((a, b) => new Date(b.date) - new Date(a.date))
+        .slice(0, 5);
+
+    return { entries };
 }
 
 // Edit-role employees only. Re-pulls live balances from Daftra -- can take
 // a minute or two on an account with a lot of invoice history. Never
-// touches Short Debtors.
+// touches Short Debtors. Also refreshes the Products Cache sheet (see
+// refreshProductsCache() in Daftra.gs) so this one button keeps both the
+// debtor snapshot and the product catalog that syncBundle() reads current.
 function refreshDebtsFromApp(employeeName, employeePin) {
     requireEditAccess_(employeeName, employeePin);
 
-    return refreshDebtsSnapshot();
+    const debtsResult = refreshDebtsSnapshot();
+    const productsResult = refreshProductsCache();
+
+    return Object.assign({}, debtsResult, productsResult);
 }
 
 // ============================================================
@@ -346,6 +622,32 @@ function getLongDebtorAccount(employeeName, employeePin, clientId) {
     return getDaftraClientStatement(clientId);
 }
 
+// Manual "needs reconciliation" flag -- our balance calc has no way to
+// detect a Daftra journal-entry adjustment (see getClientMetadata_()'s
+// header comment in Daftra.gs for why that can't be automated), so this
+// is a plain owner-set marker instead, toggled by hand and shown as a
+// warning tag on the card until cleared. Edit-role only. Returns the new
+// state so the app can update without a full resync.
+function toggleReconciliationFlag(employeeName, employeePin, clientId) {
+    const employee = requireEditAccess_(employeeName, employeePin);
+
+    const sheet = getDebtsSheet_();
+    const { row, values } = loadDebtRow_(sheet, clientId);
+
+    const newState = values[14] !== true;
+    sheet.getRange(row, 15).setValue(newState); // Needs Reconciliation
+
+    appendDebtLogEntry_(
+        sheet,
+        row,
+        values,
+        employee.name,
+        newState ? "Flagged: balance may not match Daftra (manual journal entry)" : "Reconciliation flag cleared",
+    );
+
+    return { success: true, needsReconciliation: newState };
+}
+
 // Records a real payment in Daftra against a Long Debtor's account --
 // amount + an optional note, nothing else (kept to one field for speed on
 // a phone). Edit-role only, since this is a real financial write.
@@ -359,14 +661,24 @@ function addLongDebtorPayment(employeeName, employeePin, clientId, amount, note)
 
     const result = addDaftraClientPayment(clientId, amt, note);
 
-    // Also log it locally so it shows up in this debtor's follow-up
-    // history alongside notes/reschedules, if they're tracked as a Long
-    // Debtor in the snapshot sheet too.
+    // Also refresh this one client's balance and log it locally, so it
+    // shows up in this debtor's follow-up history alongside notes/
+    // reschedules and the card's balance is correct without waiting for
+    // a full "Refresh from Daftra" -- same pattern addLongDebtorInvoice()
+    // already uses. Confirmed 2026-08-28: this used to only log the
+    // payment, never touch Amount Owed, so the card kept showing the
+    // pre-payment balance until the next full refresh.
+    // sheetUpdated is reported back to the app (owner's request,
+    // 2026-08-28: a visible indicator for each sync target) -- this used
+    // to fail completely silently, so a sheet-side problem here was
+    // invisible even though the real Daftra write above had succeeded.
+    let sheetUpdated = false;
     try {
         const sheet = getDebtsSheet_();
         const row = findDebtRow_(sheet, clientId);
         if (row) {
             const values = sheet.getRange(row, 1, 1, DEBTS_HEADERS.length).getValues()[0];
+            sheet.getRange(row, 4).setValue(getSingleClientBalance_(clientId)); // Amount Owed
             appendDebtLogEntry_(
                 sheet,
                 row,
@@ -374,13 +686,128 @@ function addLongDebtorPayment(employeeName, employeePin, clientId, amount, note)
                 employee.name,
                 `Payment recorded in Daftra: ${amt}${note ? " -- " + note : ""}`,
             );
+            sheetUpdated = true;
         }
     } catch (e) {
         // Not being in the snapshot yet shouldn't block the real Daftra
-        // payment that already succeeded above.
+        // payment that already succeeded above -- sheetUpdated just stays
+        // false so the app can say so.
     }
 
-    return { success: true, daftraResponse: result };
+    return { success: true, daftraResponse: result, sheetUpdated };
+}
+
+// Corrects the amount on an existing Long Debtor payment in Daftra
+// itself -- owner's request, 2026-08-31. Edit-role only, since this is a
+// real financial write. paymentId comes from an entry in
+// getLongDebtorAccount()'s statement list.
+function editLongDebtorPayment(employeeName, employeePin, clientId, paymentId, newAmount) {
+    const employee = requireEditAccess_(employeeName, employeePin);
+    const amt = Number(newAmount);
+
+    if (!amt || amt <= 0) {
+        throw new Error("Enter an amount greater than zero.");
+    }
+
+    editDaftraClientPayment_(paymentId, clientId, amt);
+
+    let sheetUpdated = false;
+    try {
+        const sheet = getDebtsSheet_();
+        const row = findDebtRow_(sheet, clientId);
+        if (row) {
+            const values = sheet.getRange(row, 1, 1, DEBTS_HEADERS.length).getValues()[0];
+            sheet.getRange(row, 4).setValue(getSingleClientBalance_(clientId)); // Amount Owed
+            appendDebtLogEntry_(sheet, row, values, employee.name, `Payment #${paymentId} corrected to ${amt} in Daftra`);
+            sheetUpdated = true;
+        }
+    } catch (e) {
+        // Not being in the snapshot yet shouldn't block the real Daftra
+        // edit that already succeeded above.
+    }
+
+    return { success: true, sheetUpdated };
+}
+
+// Creates a real Daftra due invoice against a Long Debtor's account (the
+// Daftra-side counterpart to addToShortDebt above) -- amount + an
+// optional note, matching addLongDebtorPayment's one-field-for-speed
+// shape. Edit-role only, since this is a real financial write.
+function addLongDebtorInvoice(employeeName, employeePin, clientId, amount, note) {
+    const employee = requireEditAccess_(employeeName, employeePin);
+    const amt = Number(amount);
+
+    if (!amt || amt <= 0) {
+        throw new Error("Enter an amount greater than zero.");
+    }
+
+    const result = createDaftraDueInvoice_(clientId, amt, note);
+
+    // Refresh just this one client's balance rather than the whole sheet
+    // -- refreshDebtsSnapshot() re-scans every invoice in the account,
+    // too slow to run after a single new invoice. Also logged locally,
+    // same as addLongDebtorPayment does. sheetUpdated is reported back to
+    // the app (owner's request, 2026-08-28: a visible indicator for each
+    // sync target) -- this used to fail completely silently, so a sheet
+    // -side problem here was invisible even though the real Daftra write
+    // above had already succeeded.
+    let sheetUpdated = false;
+    try {
+        const sheet = getDebtsSheet_();
+        const row = findDebtRow_(sheet, clientId);
+        if (row) {
+            const values = sheet.getRange(row, 1, 1, DEBTS_HEADERS.length).getValues()[0];
+            sheet.getRange(row, 4).setValue(getSingleClientBalance_(clientId)); // Amount Owed
+            appendDebtLogEntry_(
+                sheet,
+                row,
+                values,
+                employee.name,
+                `New invoice added in Daftra: ${amt}${note ? " -- " + note : ""}`,
+            );
+            sheetUpdated = true;
+        }
+    } catch (e) {
+        // Not being in the snapshot yet shouldn't block the real Daftra
+        // invoice that already succeeded above -- sheetUpdated just stays
+        // false so the app can say so.
+    }
+
+    return { success: true, invoiceId: result.id, invoiceNo: result.no, sheetUpdated };
+}
+
+// Corrects the amount on an existing Long Debtor invoice in Daftra
+// itself -- owner's request, 2026-08-31. Edit-role only, since this is a
+// real financial write. Only works for the simple single-line "due
+// invoice" shape this app creates -- see editDaftraDueInvoice_()'s
+// comment for why (and the ZATCA e-invoicing guard). invoiceId comes
+// from an entry in getLongDebtorAccount()'s statement list.
+function editLongDebtorInvoice(employeeName, employeePin, clientId, invoiceId, newAmount) {
+    const employee = requireEditAccess_(employeeName, employeePin);
+    const amt = Number(newAmount);
+
+    if (!amt || amt <= 0) {
+        throw new Error("Enter an amount greater than zero.");
+    }
+
+    editDaftraDueInvoice_(invoiceId, clientId, amt);
+
+    let sheetUpdated = false;
+    try {
+        const sheet = getDebtsSheet_();
+        const row = findDebtRow_(sheet, clientId);
+        if (row) {
+            const values = sheet.getRange(row, 1, 1, DEBTS_HEADERS.length).getValues()[0];
+            sheet.getRange(row, 4).setValue(getSingleClientBalance_(clientId)); // Amount Owed
+            appendDebtLogEntry_(sheet, row, values, employee.name, `Invoice #${invoiceId} corrected to ${amt} in Daftra`);
+            sheetUpdated = true;
+        }
+    } catch (e) {
+        // Not being in the snapshot yet shouldn't block the real Daftra
+        // edit that already succeeded above.
+    }
+
+    return { success: true, sheetUpdated };
 }
 
 // ============================================================
