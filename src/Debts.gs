@@ -58,13 +58,20 @@ function rowToDebt_(row) {
     const type = row[2] || "Long";
     const dateGiven = normalizeDebtDate_(row[8]);
     const status = row[5] || CONFIG.DEBT_STATUS.ACTIVE;
+    const amount = Number(row[3]) || 0;
+    const amountPaid = Number(row[4]) || 0;
 
     // Short Debtors are meant to close within a couple of days or get
     // created as a real Daftra invoice -- flag one that's lingered so it
-    // doesn't just quietly sit in the sheet.
+    // doesn't just quietly sit in the sheet. Excludes a debtor already
+    // paid down to zero (owner's request, 2026-09-02: paid-off Short
+    // debtors stay "active" instead of auto-closing, so this can't lean
+    // on status alone anymore -- a settled $0 balance sitting active for
+    // a few days isn't "lingering," there's nothing left to invoice).
     const isAgingShort =
         type === "Short" &&
         status === CONFIG.DEBT_STATUS.ACTIVE &&
+        amount - amountPaid > 0 &&
         daysSince_(dateGiven) >= CONFIG.SHORT_DEBTOR_AGING_DAYS;
 
     return {
@@ -74,8 +81,8 @@ function rowToDebt_(row) {
         // already holds as strings, so this keeps that consistent.
         clientId: String(row[1]),
         type,
-        amount: Number(row[3]) || 0,
-        amountPaid: Number(row[4]) || 0,
+        amount,
+        amountPaid,
         status,
         // String() -- the Phone column is now formatted plain-text at the
         // source (refreshDebtsSnapshot() in Daftra.gs) to stop Sheets
@@ -216,10 +223,13 @@ function recordDebtPayment(employeeName, employeePin, clientId, amount) {
 
     sheet.getRange(row, 5).setValue(newPaid); // Amount Paid
 
-    if (newRemaining <= 0) {
-        sheet.getRange(row, 6).setValue(CONFIG.DEBT_STATUS.PAID); // Status
-    }
-
+    // Deliberately does NOT auto-mark the debtor "paid" just because the
+    // running balance hit zero (owner's request, 2026-09-02: Short
+    // debtors should stay open/active at a zero balance -- a paid-off
+    // record disappearing from the Active list made it harder to spot a
+    // repeat debtor and add straight to their existing row). Marking
+    // fully paid stays a deliberate, separate action via setDebtStatus().
+    //
     // Short debtors get a proper structured row in Short Debtor
     // Transactions instead of a text note here -- recording the same
     // payment in both places would just be a duplicate (owner's request,
