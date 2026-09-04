@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A standalone Apps Script project (not container-bound to any Sheet) that's a pure JSON API for `employee-debts-app`, a separate PWA employees use on their phones to check debtors and product prices. It's deliberately split out from the owner's `pl-report-google-script-v2` sales-tracker project — see `Api.gs`'s header comment (page-size limits in that project's HtmlService sandbox, and employees shouldn't see the owner's sales/dashboard tabs at all).
 
+For how this project fits together with `pl-report-google-script-v2` and `employee-debts-app` (shared Sheet, shared Daftra account), see the [architecture diagram](https://claude.ai/code/artifact/5fd8bd90-a0b1-4389-926a-859cb014fa91).
+
 ## Commands
 
 - `npm run push` — `clasp push` (this project has no build step; `.clasp.json`'s `rootDir` is `src` directly, unlike the sales-tracker project).
