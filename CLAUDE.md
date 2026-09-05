@@ -6,7 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A standalone Apps Script project (not container-bound to any Sheet) that's a pure JSON API for `employee-debts-app`, a separate PWA employees use on their phones to check debtors and product prices. It's deliberately split out from the owner's `pl-report-google-script-v2` sales-tracker project — see `Api.gs`'s header comment (page-size limits in that project's HtmlService sandbox, and employees shouldn't see the owner's sales/dashboard tabs at all).
 
-For how this project fits together with `pl-report-google-script-v2` and `employee-debts-app` (shared Sheet, shared Daftra account), see the [architecture diagram](https://claude.ai/code/artifact/5fd8bd90-a0b1-4389-926a-859cb014fa91).
+For how this project fits together with `pl-report-google-script-v2` and `employee-debts-app` (shared Sheet, shared Daftra account), see the [architecture diagram](https://claude.ai/code/artifact/5fd8bd90-a0b1-4389-926a-859cb014fa91) and, for a version-controlled fallback that doesn't depend on that external link surviving, this repo's own [ARCHITECTURE.md](ARCHITECTURE.md).
+
+**Before making a non-trivial change, check [DECISIONS.md](DECISIONS.md) and [KNOWN_ISSUES.md](KNOWN_ISSUES.md) first** — they capture business rules, confirmed incidents, and in-progress investigations that aren't otherwise visible from reading the current code, including a documented case of this repo's own git history materially understating what actually shipped (see "Documentation and process" below).
 
 ## Commands
 
@@ -26,6 +28,10 @@ AKfycbx5--YJ4IF6VEQqk14AGB0Pxfnv8mpQbmu_e5iTyebZSQKBg_pD7eP2C79Zdk9nor-zDQ
 **Every backend change needs `clasp deploy -i <that id>` after `clasp push`**, or employees keep hitting the old code even though `clasp push` "succeeded." This is the opposite of `pl-report-google-script-v2`'s workflow, where HEAD *is* the live URL (that only holds there because only the owner, who has edit rights, ever opens it) — don't assume the two projects deploy the same way. Confirm the current deployment id/URL with `clasp deployments` if in doubt, and check `js/api.js`'s `API_URL` in `employee-debts-app` to see what URL the PWA actually points at.
 
 Script Properties (`DAFTRA_SUBDOMAIN`, `DAFTRA_API_KEY`) are **not shared** with the sales-tracker project even though both talk to the same Daftra account — set them here separately (Project Settings → Script Properties).
+
+**Hard rule, with one deliberate exception for debugging:**
+- **An intentional deployment to the shared production URL** — i.e. `clasp deploy -i <the versioned id>`, the step that actually changes what employees hit — must correspond to a committed git checkpoint. Commit the change (with a `DECISIONS.md`/`KNOWN_ISSUES.md` update if it's the kind of change either file covers) *before or immediately after* that deploy — never batch up several sessions' worth of production deploys into one later catch-up commit. This is not a style preference: see `KNOWN_ISSUES.md`'s first entry for the real incident (commit `4d77bde`) where exactly that happened and the fine-grained "why" for eight bundled changes was already gone by the time anyone reconciled git.
+- **A `clasp push` used only to test something in a live Apps Script execution** (e.g. running a diagnostic function from the editor, or checking a change against test client #630 before deciding it's right) does not itself require a commit first — but it also must never be described as a completed fix, a finished production change, or evidence that the repo is "deploy-safe" until it *has* been committed and deployed to the versioned id per the rule above. Don't let an uncommitted debugging push linger past the session that made it, either — resolve it one way or the other (commit-and-deploy, or revert) before moving on.
 
 ## Architecture
 
