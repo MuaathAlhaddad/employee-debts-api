@@ -692,13 +692,27 @@ function addLongDebtorPayment(employeeName, employeePin, clientId, amount, note)
     // 2026-08-28: a visible indicator for each sync target) -- this used
     // to fail completely silently, so a sheet-side problem here was
     // invisible even though the real Daftra write above had succeeded.
+    //
+    // `balance` (2026-09-06: "Financial writes must be online-only"
+    // decision, DECISIONS.md) is this same authoritative Daftra scan,
+    // captured once and returned to the caller too -- so the app can show/
+    // send the real post-payment balance directly instead of guessing it
+    // locally. Computed unconditionally (not only when the client already
+    // has a Sheet row) since the app needs it regardless of Sheet state.
+    // A failure here must not be reported as a failed payment -- the real
+    // Daftra payment above already succeeded -- so it's swallowed by the
+    // same catch as the Sheet update below; balance just comes back null
+    // and the caller must not treat that as (or fabricate) a real number.
+    let balance = null;
     let sheetUpdated = false;
     try {
+        balance = getSingleClientBalance_(clientId);
+
         const sheet = getDebtsSheet_();
         const row = findDebtRow_(sheet, clientId);
         if (row) {
             const values = sheet.getRange(row, 1, 1, DEBTS_HEADERS.length).getValues()[0];
-            sheet.getRange(row, 4).setValue(getSingleClientBalance_(clientId)); // Amount Owed
+            sheet.getRange(row, 4).setValue(balance); // Amount Owed
             appendDebtLogEntry_(
                 sheet,
                 row,
@@ -709,12 +723,13 @@ function addLongDebtorPayment(employeeName, employeePin, clientId, amount, note)
             sheetUpdated = true;
         }
     } catch (e) {
-        // Not being in the snapshot yet shouldn't block the real Daftra
-        // payment that already succeeded above -- sheetUpdated just stays
-        // false so the app can say so.
+        // Not being in the snapshot yet (or a transient Daftra failure on
+        // the balance re-scan) shouldn't block the real Daftra payment
+        // that already succeeded above -- sheetUpdated/balance just stay
+        // at their defaults so the app can say so.
     }
 
-    return { success: true, daftraResponse: result, sheetUpdated };
+    return { success: true, daftraResponse: result, sheetUpdated, balance };
 }
 
 // Corrects the amount on an existing Long Debtor payment in Daftra
@@ -771,13 +786,23 @@ function addLongDebtorInvoice(employeeName, employeePin, clientId, amount, note)
     // sync target) -- this used to fail completely silently, so a sheet
     // -side problem here was invisible even though the real Daftra write
     // above had already succeeded.
+    //
+    // `balance` (2026-09-06: "Financial writes must be online-only"
+    // decision, DECISIONS.md) is this same authoritative Daftra scan,
+    // captured once and returned to the caller too -- see
+    // addLongDebtorPayment's matching comment above for the full
+    // rationale (computed unconditionally, failure here doesn't fail the
+    // already-succeeded Daftra invoice).
+    let balance = null;
     let sheetUpdated = false;
     try {
+        balance = getSingleClientBalance_(clientId);
+
         const sheet = getDebtsSheet_();
         const row = findDebtRow_(sheet, clientId);
         if (row) {
             const values = sheet.getRange(row, 1, 1, DEBTS_HEADERS.length).getValues()[0];
-            sheet.getRange(row, 4).setValue(getSingleClientBalance_(clientId)); // Amount Owed
+            sheet.getRange(row, 4).setValue(balance); // Amount Owed
             appendDebtLogEntry_(
                 sheet,
                 row,
@@ -788,12 +813,13 @@ function addLongDebtorInvoice(employeeName, employeePin, clientId, amount, note)
             sheetUpdated = true;
         }
     } catch (e) {
-        // Not being in the snapshot yet shouldn't block the real Daftra
-        // invoice that already succeeded above -- sheetUpdated just stays
-        // false so the app can say so.
+        // Not being in the snapshot yet (or a transient Daftra failure on
+        // the balance re-scan) shouldn't block the real Daftra invoice
+        // that already succeeded above -- sheetUpdated/balance just stay
+        // at their defaults so the app can say so.
     }
 
-    return { success: true, invoiceId: result.id, invoiceNo: result.no, sheetUpdated };
+    return { success: true, invoiceId: result.id, invoiceNo: result.no, sheetUpdated, balance };
 }
 
 // Corrects the amount on an existing Long Debtor invoice in Daftra
