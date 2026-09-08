@@ -18,6 +18,9 @@ const CONFIG = {
         DEBTS_REVIEW: "Debts Review Log",
         PRODUCTS_CACHE: "Products Cache",
         PRODUCT_PRICE_CACHE: "Product Price Cache",
+        // Daftra Client -> Notebook Client migration links (2026-09-08) --
+        // see Migrations.gs.
+        CLIENT_MIGRATIONS: "Client Migrations",
     },
 
     DEBT_STATUS: {

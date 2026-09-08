@@ -131,6 +131,15 @@ function getDebtsList(employeeName, employeePin) {
     const long = debts.filter((d) => d.type !== "Short").sort((a, b) => b.amount - a.amount);
     const short = debts.filter((d) => d.type === "Short").sort((a, b) => b.amount - a.amount);
 
+    // Daftra Client -> Notebook Client migration state (Migrations.gs) --
+    // attached here so the card has everything it needs in one call, same
+    // reasoning as syncBundle's one-call design elsewhere in this app.
+    // Only ever meaningful for Long debtors.
+    const migrations = getClientMigrationsMap_();
+    long.forEach((d) => {
+        d.migration = migrations[d.clientId] || null;
+    });
+
     const outstanding = (d) => (d.status === CONFIG.DEBT_STATUS.ACTIVE ? d.amount - d.amountPaid : 0);
     const total = debts.reduce((sum, d) => sum + outstanding(d), 0);
 

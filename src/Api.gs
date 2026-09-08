@@ -48,6 +48,11 @@ const API_ACTIONS = {
     editLongDebtorInvoice,
     toggleReconciliationFlag,
 
+    // Daftra Client -> Notebook Client migration -- Owner-only (each
+    // re-checks the role server-side; not just hidden in the frontend).
+    convertDaftraClientToNotebook,
+    disableDaftraClient,
+
     // Product search
     searchProducts,
     getProductPurchaseHistory,

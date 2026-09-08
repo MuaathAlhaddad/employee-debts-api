@@ -35,6 +35,14 @@ function getEmployeeNames() {
         .map((row) => ({ name: String(row[0]) }));
 }
 
+// Role column now supports three values -- "owner", "edit", anything else
+// (blank/misspelled) collapses to "view", same as before. "owner" was added
+// 2026-09-08 for the Daftra Client -> Notebook Client migration workflow,
+// which needs a real server-side tier above "edit" -- see DECISIONS.md's
+// 2026-09-08 entry, which supersedes the 2026-09-05 decision that there was
+// no such tier. Set the shop owner's row's Role to "owner" by hand in the
+// Employees sheet for this to take effect -- it stays "edit" (or whatever
+// it is today) until that's done, and nothing else changes for anyone else.
 function authenticateEmployee(name, pin) {
     const rows = getEmployeeRows_();
 
@@ -48,7 +56,7 @@ function authenticateEmployee(name, pin) {
         ) {
             return {
                 name: String(rowName).trim(),
-                role: rowRole === "edit" ? "edit" : "view",
+                role: rowRole === "owner" ? "owner" : rowRole === "edit" ? "edit" : "view",
             };
         }
     }
@@ -56,11 +64,28 @@ function authenticateEmployee(name, pin) {
     throw new Error("Name or PIN not recognized -- check with the shop owner.");
 }
 
+// "owner" is a superset of "edit" -- the Owner can do everything an
+// edit-role employee can, plus the owner-only actions gated by
+// requireOwnerAccess_() below.
 function requireEditAccess_(employeeName, employeePin) {
     const employee = authenticateEmployee(employeeName, employeePin);
 
-    if (employee.role !== "edit") {
+    if (employee.role !== "edit" && employee.role !== "owner") {
         throw new Error("You have view-only access and can't make changes.");
+    }
+
+    return employee;
+}
+
+// Owner-only gate -- for the Daftra Client -> Notebook Client migration
+// workflow (Migrations.gs). Never gate a server-side action on the
+// employee's NAME instead of this real role check (see the comment above
+// authenticateEmployee for why that was deliberately rejected here).
+function requireOwnerAccess_(employeeName, employeePin) {
+    const employee = authenticateEmployee(employeeName, employeePin);
+
+    if (employee.role !== "owner") {
+        throw new Error("Only the shop owner can do that.");
     }
 
     return employee;

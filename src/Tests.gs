@@ -121,6 +121,100 @@ function runSmokeTests(employeeName, employeePin) {
         );
     });
 
+    check("Migration: convert creates a Notebook client, repeat call doesn't duplicate", () => {
+        const migrationsSheet = getClientMigrationsSheet_();
+        const debtsSheet = getDebtsSheet_();
+
+        // Clean slate -- clear any leftover migration row for the test
+        // client from a previous failed run before starting.
+        const leftover = findClientMigrationRow_(migrationsSheet, TEST_LONG_CLIENT_ID);
+        if (leftover) migrationsSheet.deleteRow(leftover.row);
+
+        const first = convertDaftraClientToNotebook(employeeName, employeePin, TEST_LONG_CLIENT_ID);
+        if (!first.notebookClientId || first.alreadyExists) {
+            throw new Error("first conversion should create a new Notebook client: " + JSON.stringify(first));
+        }
+
+        const second = convertDaftraClientToNotebook(employeeName, employeePin, TEST_LONG_CLIENT_ID);
+        if (!second.alreadyExists || second.notebookClientId !== first.notebookClientId) {
+            throw new Error("repeat conversion should return the SAME Notebook client, not create a new one: " + JSON.stringify(second));
+        }
+
+        // Self-cleaning -- delete the Short debtor row and the Migrations
+        // row this test created, so client #630 stays a clean sandbox
+        // record (mirrors this suite's other self-cleaning checks above).
+        const shortRow = findDebtRow_(debtsSheet, first.notebookClientId);
+        if (shortRow) debtsSheet.deleteRow(shortRow);
+        const migrationRow = findClientMigrationRow_(migrationsSheet, TEST_LONG_CLIENT_ID);
+        if (migrationRow) migrationsSheet.deleteRow(migrationRow.row);
+    });
+
+    // NOT covered here, deliberately:
+    //   - Owner-only rejection for a non-owner employee -- runSmokeTests
+    //     only ever runs as one identity (see the curl example in
+    //     CLAUDE.md), so there's no second non-owner credential available
+    //     to call convertDaftraClientToNotebook/disableDaftraClient with
+    //     and confirm they throw. Test this by hand once with a real
+    //     edit-role (non-owner) PIN.
+    //   - disableDaftraClient()'s balance-clear + rename/suspend, end to
+    //     end -- gated on testClientRenameSuspendRoundTrip() below passing
+    //     first (the rename/suspend field-name guess needs manual
+    //     confirmation before ANY automated test touches a client's
+    //     business_name/suspend field, even the designated test one).
+
     const passed = results.filter((r) => r.passed).length;
     return { passed, total: results.length, results };
+}
+
+// ============================================================
+// Client rename+suspend diagnostics -- NOT part of runSmokeTests. Run
+// these ONCE by hand (function dropdown -> pick one -> Run -> View Logs)
+// against TEST_LONG_CLIENT_ID before trusting daftraDisableClient_()
+// (Daftra.gs) -- and therefore "Disable Daftra Client" -- against any real
+// client. Same "verify against a real account before trusting the numbers"
+// discipline this file's other Daftra-facing tests already follow (see
+// Daftra.gs's header comment) -- kept manual rather than automated because
+// the field-name guess this relies on (business_name) has never been
+// confirmed here, unlike the payment/invoice fields the automated checks
+// above exercise.
+// ============================================================
+
+// Dumps the RAW clients/{id}.json response so the real field name for a
+// client's display name (and anything else daftraDisableClient_() might
+// need to carry forward more carefully) can be read directly.
+function testRawClient(clientId) {
+    clientId = clientId || TEST_LONG_CLIENT_ID;
+    Logger.log("RAW clients/%s.json: %s", clientId, JSON.stringify(daftraGet_(`clients/${clientId}.json`, {}), null, 2));
+}
+
+// Self-cleaning round trip: renames+suspends the TEST client, verifies both
+// stuck, then renames+unsuspends it back to its original state. NEVER pass
+// a real client_id here.
+function testClientRenameSuspendRoundTrip(clientId) {
+    clientId = clientId || TEST_LONG_CLIENT_ID;
+
+    const before = getDaftraClient_(clientId);
+    const originalName = before.business_name;
+
+    daftraDisableClient_(clientId, "TEST - rename round trip (safe to ignore if seen)");
+
+    const afterDisable = getDaftraClient_(clientId);
+    if (afterDisable.business_name !== "TEST - rename round trip (safe to ignore if seen)") {
+        throw new Error("Rename didn't take -- got " + JSON.stringify(afterDisable.business_name));
+    }
+    if (String(afterDisable.suspend) !== "1") {
+        throw new Error("Suspend didn't take -- got " + JSON.stringify(afterDisable.suspend));
+    }
+
+    const client = getDaftraClient_(clientId);
+    const restore = Object.assign({}, client, { business_name: originalName, suspend: 0 });
+    const result = daftraPut_(`clients/${clientId}.json`, { Client: restore });
+
+    if (result.code < 200 || result.code >= 300) {
+        throw new Error(
+            `Round trip succeeded but RESTORE failed -- fix client ${clientId} by hand in Daftra (original name: "${originalName}", suspend: 0). Daftra said: ${result.body}`,
+        );
+    }
+
+    Logger.log("Rename+suspend round trip OK for client %s (restored to name=%s, suspend=0).", clientId, originalName);
 }

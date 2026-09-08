@@ -10,6 +10,22 @@ Each entry: date, decision, why, where it's enforced/relevant in code.
 
 ---
 
+## 2026-09-08 — Daftra Client → Notebook Client migration: a real "owner" role now exists, superseding the 2026-09-05 "no owner tier" decision
+
+**Decision:** `Employees.gs`'s Role column now supports a third value, `"owner"`, checked server-side by a new `requireOwnerAccess_()` (Employees.gs) — separate from `requireEditAccess_()`, which now treats `"owner"` as a superset of `"edit"` (an Owner can still do everything an edit-role employee can). This exists specifically to gate the new Daftra Client → Notebook Client migration workflow (`convertDaftraClientToNotebook`/`disableDaftraClient`, `Migrations.gs`) — both actions independently re-check this role server-side, not just in the frontend (`employee-debts-app`'s `debtCardHtml()` only uses the role to decide whether to show the buttons).
+
+**Why this supersedes the 2026-09-05 entry below:** that entry states "Owner is not a distinct permission level anywhere in this code... do not invent owner-specific server-side logic based on the name alone" — accurate at the time, and still the right default. This migration workflow is destructive enough (clears a real Daftra balance, renames and suspends a real client) that it needed real server-side authorization stronger than the edit/view binary, and gating it on a configured employee *name* was explicitly rejected in favor of this real role instead (owner's choice, 2026-09-08, when asked to pick between the two). The 2026-09-05 entry is left below unmodified rather than rewritten, since it's still correct as a description of *why no such tier existed before this* — read both together.
+
+**How to apply:** The shop owner's row in the `Employees` sheet must have its Role cell set to `owner` by hand for `requireOwnerAccess_()` to ever succeed — it stays whatever it was before (probably `edit`) until that's done, and nothing else about the existing edit/view behavior changes for anyone else. Don't extend this to gate anything else "because it's convenient" without a similar explicit decision — the default from the 2026-09-05 entry (no owner-specific logic) still holds everywhere else in this codebase.
+
+## 2026-09-08 — Daftra Client → Notebook Client migration: "clearing the balance" means a real Daftra `client_payment`, not a silent field reset
+
+**Decision:** `disableDaftraClient()` (`Migrations.gs`) clears a Daftra client's outstanding balance by calling the existing `addDaftraClientPayment()` (`Daftra.gs`) for the full live balance — the exact same mechanism "Add Payment" already uses elsewhere in this app. There is no write-off/credit-note/balance-adjustment API implemented or verified anywhere in this codebase (checked as part of this feature; see `KNOWN_ISSUES.md`'s corresponding entry) — a real `client_payments.json` payment is the only existing mechanism that reduces a client's `summary_unpaid`.
+
+**Why:** Explicitly chosen (owner's decision, 2026-09-08) over leaving balance-clearing unimplemented. Trade-off worth recording: this records a real, permanent Daftra accounting entry stating the client paid in cash — even in the common case where the real situation is "this client's tracking is moving to the Notebook, not that they actually paid." This preserves Daftra's accounting integrity (a real, auditable transaction rather than a silently zeroed field) at the cost of that entry not literally describing what happened. The payment's note field records this explicitly (`"Balance cleared -- migrated to Notebook client <id>"`) so anyone reading the Daftra statement later has that context.
+
+**How to apply:** Don't build a "smarter" balance-clearing path (a credit note, a journal entry) without first confirming Daftra's api2 actually exposes one safely — this was investigated for this feature and came up empty (see `KNOWN_ISSUES.md`). If that changes, this decision should be revisited, not silently overridden.
+
 ## 2026-09-05 — Financial writes must be online-only; no offline queueing (client-facing decision, API-side contract)
 
 **Decision (owned by `employee-debts-app`, documented here because this API must uphold it):**

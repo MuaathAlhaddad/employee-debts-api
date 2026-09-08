@@ -86,6 +86,15 @@ UI of its own. See `CLAUDE.md` for file-level detail (`Api.gs`, `Config.gs`, `Da
    in particular, this project's responses to these actions are expected to eventually return the
    authoritative post-write balance directly (not yet implemented — see `KNOWN_ISSUES.md`).
 
+## Daftra Client → Notebook Client migration (Owner-only, added 2026-09-08)
+
+Lets the Owner move a client's debt tracking from a real Daftra client (a "Long" debtor) to a hand-entered Notebook client (a "Short" debtor), then formally disable the original once the new one's been verified. Deliberately two separate, non-atomic API actions (`Migrations.gs`), never one:
+
+1. `convertDaftraClientToNotebook` — creates a new Short debtor seeded from the Daftra client's name (balance NOT copied — see that function's header comment), and records a link in a new "Client Migrations" sheet. Never touches the original Daftra client. Calling it again for the same Daftra client returns the existing link instead of creating a duplicate.
+2. `disableDaftraClient` — only runs once step 1's link exists. Re-checks the *live* Daftra balance, clears it via a real `client_payments.json` payment if anything's outstanding (the only balance-clearing mechanism this codebase has — see `DECISIONS.md`'s 2026-09-08 entry), then renames and suspends the Daftra client (`daftraDisableClient_()`, Daftra.gs — UNVERIFIED, see `KNOWN_ISSUES.md`), then marks the migration "completed". A Daftra failure at any point stops everything after it; a retry re-reads the live balance so it can't double-pay.
+
+Both actions require the `"owner"` role (`requireOwnerAccess_()`, Employees.gs) — a real per-employee role, not a name check; see `DECISIONS.md`'s 2026-09-08 entries for why this role was added (superseding the 2026-09-05 "no owner tier" decision) and for the balance-clearing trade-off. The "Client Migrations" sheet doubles as this feature's audit trail (every field the feature needed to log lives on one row: both client IDs/names, status, created/disabled at/by, the balance actually cleared, the new Daftra name, the Daftra payment id).
+
 ## Where to look next
 
 - `CLAUDE.md` — file-by-file architecture detail and non-obvious Daftra-integration gotchas for

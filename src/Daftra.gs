@@ -661,6 +661,66 @@ function getSingleClientBalance_(clientId) {
 }
 
 // ============================================================
+// Client rename + suspend -- added 2026-09-08 for the Daftra Client ->
+// Notebook Client migration workflow (disableDaftraClient() in
+// Migrations.gs). UNVERIFIED, unlike every other Daftra write in this
+// file: the exact editable field name for a client's
+// display name has never been confirmed against a real client record here
+// -- guessed below as "business_name" (matching the "client_business_name"
+// embed already seen on invoices/payments elsewhere in this file, e.g.
+// getDaftraOutstandingDebts()). Run testRawClient() and then
+// testClientRenameSuspendRoundTrip() (Tests.gs) by hand against the
+// designated test client BEFORE trusting this against any real client --
+// if the field name guess is wrong, fix it here first.
+// ============================================================
+
+function getDaftraClient_(clientId) {
+    const current = daftraGet_(`clients/${clientId}.json`, {});
+    const client = current && current.data && current.data.Client;
+
+    if (!client || !client.id) {
+        throw new Error("That Daftra client couldn't be found.");
+    }
+
+    return client;
+}
+
+// Full-replace PUT, same discipline as editDaftraClientPayment_/
+// editDaftraDueInvoice_ above -- reads the current record first and
+// carries every field forward unchanged (via Object.assign of the whole
+// record) except business_name (rename) and suspend (disable), since
+// daftraPut_ resets any omitted field to a default rather than leaving it
+// alone. Carrying forward the ENTIRE record (rather than an explicit
+// hand-picked field list like the payment/invoice editors use) is
+// deliberate here: this account's Client resource's writable-field shape
+// has never been documented or tested in this codebase, so this is the
+// safest available guess until testClientRenameSuspendRoundTrip() confirms
+// it works (or reveals a field Daftra rejects on write, e.g. a read-only
+// computed field -- fix the payload here if so).
+function daftraDisableClient_(clientId, newName) {
+    const client = getDaftraClient_(clientId);
+
+    const payload = Object.assign({}, client, {
+        business_name: newName,
+        suspend: 1,
+    });
+
+    const result = daftraPut_(`clients/${clientId}.json`, { Client: payload });
+
+    // daftraPut_ doesn't throw on a non-2xx response (unlike daftraGet_/
+    // daftraPost_) -- checked explicitly here since this backs a
+    // destructive operation that must never be reported as successful
+    // unless Daftra actually confirmed it.
+    if (result.code < 200 || result.code >= 300) {
+        throw new Error(
+            `Daftra API error ${result.code} renaming/suspending client ${clientId}: ${String(result.body).slice(0, 500)}`,
+        );
+    }
+
+    return result;
+}
+
+// ============================================================
 // Product search -- name/SKU search plus last purchase price(s).
 //
 // The purchase_invoices.json LIST endpoint does NOT include line items

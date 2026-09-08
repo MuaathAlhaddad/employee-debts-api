@@ -42,6 +42,14 @@ next time `Api.gs`'s header comment is touched.
 
 ---
 
+## UNVERIFIED (added 2026-09-08, blocks trusting "Disable Daftra Client" against a real client) — Daftra Client resource's writable field names have never been confirmed
+
+`daftraDisableClient_()` (`Daftra.gs`, backs `disableDaftraClient()` in `Migrations.gs`) guesses the client's display-name field is `business_name` — unlike every other Daftra write in this file, this has never been confirmed against a real client record. `testRawClient()` and `testClientRenameSuspendRoundTrip()` (`Tests.gs`) were added specifically to close this gap — **run both by hand against the designated test client (#630) and confirm the round trip actually renames/suspends/restores correctly before ever calling `disableDaftraClient()` against a real client.** If the field name guess is wrong, fix `daftraDisableClient_()`'s payload before trusting it. This function was deliberately left OUT of the automated `runSmokeTests` suite for this same reason (see that function's own comment).
+
+## GAP (documented 2026-09-08, not implemented, deliberately) — No write-off/credit-note API for clearing a Daftra client's balance
+
+Investigated as part of the Daftra Client → Notebook Client migration feature: the only existing mechanism anywhere in this codebase (or `pl-report-google-script-v2`, per that repo's own Daftra integration) that reduces a client's `summary_unpaid` is recording a real `client_payments.json` payment (`addDaftraClientPayment()`). No credit-note, write-off, or balance-adjustment endpoint is implemented or verified. `disableDaftraClient()` therefore clears a balance by recording a real full-amount payment — see `DECISIONS.md`'s 2026-09-08 entry for why that trade-off was accepted rather than left unimplemented. If Daftra's api2 turns out to expose a real write-off mechanism later, this is the function to revisit.
+
 ## GAP — Financial write actions don't return the authoritative balance directly
 
 See `DECISIONS.md`'s 2026-09-05 entry ("Financial writes must be online-only"). Today,
