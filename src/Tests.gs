@@ -207,7 +207,7 @@ function testClientRenameSuspendRoundTrip(clientId) {
     }
 
     const client = getDaftraClient_(clientId);
-    const restore = Object.assign({}, client, { business_name: originalName, suspend: 0 });
+    const restore = daftraClientProfilePayload_(client, { business_name: originalName, suspend: 0 });
     const result = daftraPut_(`clients/${clientId}.json`, { Client: restore });
 
     if (result.code < 200 || result.code >= 300) {

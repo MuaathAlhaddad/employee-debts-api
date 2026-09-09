@@ -663,15 +663,26 @@ function getSingleClientBalance_(clientId) {
 // ============================================================
 // Client rename + suspend -- added 2026-09-08 for the Daftra Client ->
 // Notebook Client migration workflow (disableDaftraClient() in
-// Migrations.gs). UNVERIFIED, unlike every other Daftra write in this
-// file: the exact editable field name for a client's
-// display name has never been confirmed against a real client record here
-// -- guessed below as "business_name" (matching the "client_business_name"
-// embed already seen on invoices/payments elsewhere in this file, e.g.
-// getDaftraOutstandingDebts()). Run testRawClient() and then
-// testClientRenameSuspendRoundTrip() (Tests.gs) by hand against the
-// designated test client BEFORE trusting this against any real client --
-// if the field name guess is wrong, fix it here first.
+// Migrations.gs).
+//
+// "business_name" IS the right field -- confirmed 2026-09-09 via
+// testRawClient() against the designated test client. The FIRST version of
+// this function instead PUT the entire GET response back (every field
+// clients/{id}.json returns, via Object.assign), on the theory that
+// carrying everything forward unchanged was the safest guess when the
+// writable-field shape wasn't known -- confirmed WRONG the same day, live
+// against a real client (#526): Daftra rejected it with a 400
+// error_type "extra_data". Some of what a GET returns is clearly
+// read-only/computed (id, site_id, client_number, created, modified,
+// last_login, last_ip, link) or a static UI caption, not data at all
+// (bn1_label/bn2_label literally return "الرقم الضريبي"/"Unified Tax
+// Number") -- Daftra's PUT validator rejects a payload containing those.
+// Fixed below to an explicit allowlist of genuine profile fields instead
+// (same pattern editDaftraClientPayment_/editDaftraDueInvoice_ already use
+// for their own resources) -- still a best-effort list, not confirmed
+// exhaustive, so run testClientRenameSuspendRoundTrip() (Tests.gs) against
+// the designated test client after any future change here, before trusting
+// it against a real client again.
 // ============================================================
 
 function getDaftraClient_(clientId) {
@@ -685,25 +696,67 @@ function getDaftraClient_(clientId) {
     return client;
 }
 
+// Explicit allowlist of genuine profile fields -- NOT the whole GET
+// response. See this section's header comment for why (a full-record
+// spread got a real 400 "extra_data" from Daftra, since some of what GET
+// returns is read-only/computed metadata or a static UI caption, not
+// writable client data). Deliberately excludes: id, is_offline,
+// client_number, site_id, staff_id, created, modified, last_login,
+// last_ip, link, follow_up_status/secondary_follow_up_status,
+// original_site_id, group_price_id, timezone, bn1_label/bn2_label (UI
+// captions, not data), starting_balance, photo, birth_date, gender,
+// map_location, language_code, extra_details. Shared by
+// daftraDisableClient_() below and Tests.gs's
+// testClientRenameSuspendRoundTrip() (its restore step needs the exact
+// same allowlist, not a second copy of it).
+function daftraClientProfilePayload_(client, overrides) {
+    return Object.assign(
+        {
+            first_name: client.first_name,
+            last_name: client.last_name,
+            email: client.email,
+            address1: client.address1,
+            address2: client.address2,
+            city: client.city,
+            state: client.state,
+            postal_code: client.postal_code,
+            phone1: client.phone1,
+            phone2: client.phone2,
+            country_code: client.country_code,
+            notes: client.notes,
+            default_currency_code: client.default_currency_code,
+            national_id: client.national_id,
+            category: client.category,
+            category_id: client.category_id,
+            bn1: client.bn1,
+            bn2: client.bn2,
+            type: client.type,
+            credit_limit: client.credit_limit,
+            credit_period: client.credit_period,
+            branch_id: client.branch_id,
+            active_secondary_address: client.active_secondary_address,
+            secondary_name: client.secondary_name,
+            secondary_address1: client.secondary_address1,
+            secondary_address2: client.secondary_address2,
+            secondary_city: client.secondary_city,
+            secondary_state: client.secondary_state,
+            secondary_postal_code: client.secondary_postal_code,
+            secondary_country_code: client.secondary_country_code,
+            business_name: client.business_name,
+            suspend: client.suspend,
+        },
+        overrides,
+    );
+}
+
 // Full-replace PUT, same discipline as editDaftraClientPayment_/
 // editDaftraDueInvoice_ above -- reads the current record first and
-// carries every field forward unchanged (via Object.assign of the whole
-// record) except business_name (rename) and suspend (disable), since
-// daftraPut_ resets any omitted field to a default rather than leaving it
-// alone. Carrying forward the ENTIRE record (rather than an explicit
-// hand-picked field list like the payment/invoice editors use) is
-// deliberate here: this account's Client resource's writable-field shape
-// has never been documented or tested in this codebase, so this is the
-// safest available guess until testClientRenameSuspendRoundTrip() confirms
-// it works (or reveals a field Daftra rejects on write, e.g. a read-only
-// computed field -- fix the payload here if so).
+// carries every genuine profile field forward unchanged except
+// business_name (rename) and suspend (disable), since daftraPut_ resets
+// any omitted field to a default rather than leaving it alone.
 function daftraDisableClient_(clientId, newName) {
     const client = getDaftraClient_(clientId);
-
-    const payload = Object.assign({}, client, {
-        business_name: newName,
-        suspend: 1,
-    });
+    const payload = daftraClientProfilePayload_(client, { business_name: newName, suspend: 1 });
 
     const result = daftraPut_(`clients/${clientId}.json`, { Client: payload });
 

@@ -42,9 +42,15 @@ next time `Api.gs`'s header comment is touched.
 
 ---
 
-## UNVERIFIED (added 2026-09-08, blocks trusting "Disable Daftra Client" against a real client) — Daftra Client resource's writable field names have never been confirmed
+## RESOLVED, but re-verify before next use — Daftra client PUT rejected a full-record payload with a real 400 ("extra_data")
 
-`daftraDisableClient_()` (`Daftra.gs`, backs `disableDaftraClient()` in `Migrations.gs`) guesses the client's display-name field is `business_name` — unlike every other Daftra write in this file, this has never been confirmed against a real client record. `testRawClient()` and `testClientRenameSuspendRoundTrip()` (`Tests.gs`) were added specifically to close this gap — **run both by hand against the designated test client (#630) and confirm the round trip actually renames/suspends/restores correctly before ever calling `disableDaftraClient()` against a real client.** If the field name guess is wrong, fix `daftraDisableClient_()`'s payload before trusting it. This function was deliberately left OUT of the automated `runSmokeTests` suite for this same reason (see that function's own comment).
+**What happened (2026-09-09):** `daftraDisableClient_()`'s first version PUT the *entire* `clients/{id}.json` GET response back (`Object.assign` of every field), the same "carry everything forward" caution `daftraPut_`'s other callers use. Tried live against a real client (#526, via "Disable Daftra Client") — Daftra rejected it: `400 { "error_type": "extra_data" }`. Confirmed via `testRawClient()` (run against test client #630) that several returned fields are read-only/computed (`id`, `site_id`, `client_number`, `created`, `modified`, `last_login`, `last_ip`, `link`) or static UI captions, not data at all (`bn1_label`/`bn2_label` literally return `"الرقم الضريبي"`/`"Unified Tax Number"`) — Daftra's client-update validator rejects a payload containing those. `business_name` itself was confirmed correct as the rename field.
+
+**Fix:** `daftraClientProfilePayload_()` (`Daftra.gs`) now builds an explicit allowlist of genuine profile fields instead of spreading the whole record — same pattern `editDaftraClientPayment_`/`editDaftraDueInvoice_` already use for their own resources. Shared by `daftraDisableClient_()` and `Tests.gs`'s `testClientRenameSuspendRoundTrip()` restore step (which had the identical bug).
+
+**Client #526's state after the failed attempt:** its balance-clearing payment (the step *before* the rename/suspend PUT) had already succeeded before the PUT failed — confirmed safe to retry (the "Client Migrations" row stayed `status: pending` with a payment id recorded but no `Disabled At`; `disableDaftraClient()` re-checks the live balance on retry, so it will not double-pay).
+
+**Still needed before trusting this again:** the new allowlist is a best-effort field list, not a Daftra-documented one — **run `testClientRenameSuspendRoundTrip(630)` (Tests.gs) against the designated test client and confirm it passes before retrying "Disable Daftra Client" against any real client, including #526.** `daftraDisableClient_()` remains deliberately excluded from the automated `runSmokeTests` suite for this reason.
 
 ## GAP (documented 2026-09-08, not implemented, deliberately) — No write-off/credit-note API for clearing a Daftra client's balance
 
