@@ -50,7 +50,9 @@ next time `Api.gs`'s header comment is touched.
 
 **Client #526's state after the failed attempt:** its balance-clearing payment (the step *before* the rename/suspend PUT) had already succeeded before the PUT failed — confirmed safe to retry (the "Client Migrations" row stayed `status: pending` with a payment id recorded but no `Disabled At`; `disableDaftraClient()` re-checks the live balance on retry, so it will not double-pay).
 
-**Still needed before trusting this again:** the new allowlist is a best-effort field list, not a Daftra-documented one — **run `testClientRenameSuspendRoundTrip(630)` (Tests.gs) against the designated test client and confirm it passes before retrying "Disable Daftra Client" against any real client, including #526.** `daftraDisableClient_()` remains deliberately excluded from the automated `runSmokeTests` suite for this reason.
+**Second round, same investigation (2026-09-09):** `testClientRenameSuspendRoundTrip(630)` then hit a second, different 400 -- `validation_errors.email`: `"Email is required if you chose to send the invoice via email"`. Test client #630's `email` is blank, and this account rejects a blank email on ANY client write if that client's invoicing method is set to Email -- the exact same account-level quirk `createDaftraDueInvoice_()` already documented and worked around for invoice creation. `daftraClientProfilePayload_()` now falls back to the same placeholder shape (`client<id>@placeholder.invalid`) when `email` is blank.
+
+**Still needed before trusting this again:** the allowlist + email fallback are still a best-effort guess, not Daftra-documented — **run `testClientRenameSuspendRoundTrip(630)` (Tests.gs) again and confirm it passes end to end before retrying "Disable Daftra Client" against any real client, including #526.** `daftraDisableClient_()` remains deliberately excluded from the automated `runSmokeTests` suite for this reason.
 
 ## GAP (documented 2026-09-08, not implemented, deliberately) — No write-off/credit-note API for clearing a Daftra client's balance
 

@@ -709,12 +709,21 @@ function getDaftraClient_(clientId) {
 // daftraDisableClient_() below and Tests.gs's
 // testClientRenameSuspendRoundTrip() (its restore step needs the exact
 // same allowlist, not a second copy of it).
+//
+// email falls back to a placeholder if blank -- confirmed 2026-09-09
+// (testClientRenameSuspendRoundTrip against test client #630, whose email
+// is blank): this account rejects ANY client write with a blank email if
+// that client's invoicing method is set to Email ("البريد الإلكتروني
+// مطلوب إذا اخترت أن ترسل الفاتورة عبر البريد" -- "Email is required if
+// you chose to send the invoice via email"). Same account-level quirk
+// createDaftraDueInvoice_() already works around for invoice creation
+// (see its own comment) -- same fallback shape here for consistency.
 function daftraClientProfilePayload_(client, overrides) {
     return Object.assign(
         {
             first_name: client.first_name,
             last_name: client.last_name,
-            email: client.email,
+            email: client.email || `client${client.id}@placeholder.invalid`,
             address1: client.address1,
             address2: client.address2,
             city: client.city,
