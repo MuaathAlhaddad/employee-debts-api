@@ -86,13 +86,13 @@ function getClientMigrationsMap_() {
 // ============================================================
 
 // Creates a new Notebook (Short) debtor seeded from the Daftra client's
-// name, and records a persistent link between the two so a repeat click
-// can't create a duplicate (feature spec #6). Deliberately does NOT copy
-// the Daftra balance or any financial history onto the new Notebook client
-// (feature spec #4: "the Owner gets a new Notebook client, not a
-// duplicated Daftra financial history") -- it starts at zero; real debt is
-// added to it afterward the normal way (addToShortDebt in Debts.gs), same
-// as any other Notebook client.
+// name AND current balance, and records a persistent link between the two
+// so a repeat click can't create a duplicate (feature spec #6). Starting
+// balance IS carried over -- owner's explicit request, 2026-09-09,
+// overriding this feature's original spec (which said not to copy it) --
+// logged as a real "debt_added" Short Debtor Transaction so the Notebook
+// client's own account statement shows where the opening balance came
+// from, not just an unexplained non-zero number.
 //
 // Never touches the original Daftra client -- it stays a fully active Long
 // debtor until disableDaftraClient() below is run separately, after the
@@ -127,6 +127,11 @@ function convertDaftraClientToNotebook(employeeName, employeePin, daftraClientId
     const notebookClientId = "S-" + Utilities.getUuid();
     const now = new Date();
     const today = todayStr_();
+    // Amount Paid always stays 0 for a Long/Daftra debtor (Daftra's
+    // summary_unpaid is already net of payments -- see DEBTS_HEADERS'
+    // comment in Daftra.gs), so daftraRow[3] alone is the full remaining
+    // balance to carry over.
+    const openingBalance = Number(daftraRow[3]) || 0;
 
     const log = [
         {
@@ -134,20 +139,21 @@ function convertDaftraClientToNotebook(employeeName, employeePin, daftraClientId
             date: today,
             time: now.toISOString(),
             actor: employee.name,
-            note: `Created from Daftra client #${daftraClientId} ("${daftraClientName}") via Convert to Notebook Client -- balance not carried over.`,
+            note: `Created from Daftra client #${daftraClientId} ("${daftraClientName}") via Convert to Notebook Client -- opening balance ${openingBalance} carried over.`,
         },
     ];
 
     // Appended directly rather than via addShortDebt() -- that function
-    // requires amount > 0 and does name-based reopen matching, neither of
-    // which fit this "bootstrap a fresh client" case. Same row shape/
-    // columns as addShortDebt writes, though, so it displays and behaves
-    // identically to any other Notebook client from here on.
+    // does name-based reopen matching, which doesn't fit this "bootstrap a
+    // fresh client" case (this is keyed off the Daftra Migrations link, not
+    // a name match). Same row shape/columns as addShortDebt writes, though,
+    // so it displays and behaves identically to any other Notebook client
+    // from here on.
     debtsSheet.appendRow([
         daftraClientName,
         notebookClientId,
         "Short",
-        0, // Amount Owed -- deliberately not the Daftra balance, see header comment
+        openingBalance, // Amount Owed -- carried over from the Daftra client
         0, // Amount Paid
         CONFIG.DEBT_STATUS.ACTIVE,
         String(daftraRow[6] || ""), // Phone -- carried over, same person
@@ -160,6 +166,22 @@ function convertDaftraClientToNotebook(employeeName, employeePin, daftraClientId
         "", // Creditor
     ]);
 
+    // Structured Short Debtor Transactions row, same as any other new debt
+    // (addShortDebt) -- otherwise the Notebook client's own "Client
+    // account" statement would show a non-zero balance with no
+    // transaction explaining it.
+    if (openingBalance > 0) {
+        logShortTransaction_(
+            notebookClientId,
+            daftraClientName,
+            "debt_added",
+            openingBalance,
+            openingBalance,
+            employee.name,
+            `Migrated from Daftra client #${daftraClientId}`,
+        );
+    }
+
     migrationsSheet.appendRow([
         daftraClientId,
         daftraClientName,
@@ -170,7 +192,7 @@ function convertDaftraClientToNotebook(employeeName, employeePin, daftraClientId
         employee.name,
         "", // Disabled At
         "", // Disabled By
-        Number(daftraRow[3]) || 0, // Original Balance -- informational/audit only, not copied to the Notebook client
+        openingBalance, // Original Balance -- also the Notebook client's carried-over opening balance
         "", // New Daftra Name
         "", // Daftra Payment ID
     ]);

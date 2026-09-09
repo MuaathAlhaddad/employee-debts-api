@@ -10,6 +10,14 @@ Each entry: date, decision, why, where it's enforced/relevant in code.
 
 ---
 
+## 2026-09-09 — Notebook client's opening balance IS carried over from the Daftra client, reversing this feature's original spec
+
+**Decision:** `convertDaftraClientToNotebook()` (`Migrations.gs`) now seeds the new Notebook client's Amount Owed with the Daftra client's current balance at conversion time, logged as a real "debt_added" Short Debtor Transaction (`Migrated from Daftra client #<id>`) so it shows up in that client's own account statement, not as an unexplained number.
+
+**Why this reverses the 2026-09-08 entry below:** the feature was originally built to start every migration-created Notebook client at zero ("the Owner gets a new Notebook client, not a duplicated Daftra financial history" — the original spec's own wording). Reversed same-week on the actual shop owner's explicit instruction after testing the feature live: the debt is still genuinely owed, and starting the Notebook client at zero made the migration look like the debt had vanished rather than moved where it's tracked.
+
+**How to apply:** The Daftra client's balance is still cleared separately and independently in `disableDaftraClient()` (a real client_payment, per the 2026-09-08 entry below) — that's unaffected by this change. The two balances (Daftra client's now-cleared balance, Notebook client's carried-over opening balance) are expected to diverge from here on; that's the point of the migration, not a bug.
+
 ## 2026-09-08 — Daftra Client → Notebook Client migration: a real "owner" role now exists, superseding the 2026-09-05 "no owner tier" decision
 
 **Decision:** `Employees.gs`'s Role column now supports a third value, `"owner"`, checked server-side by a new `requireOwnerAccess_()` (Employees.gs) — separate from `requireEditAccess_()`, which now treats `"owner"` as a superset of `"edit"` (an Owner can still do everything an edit-role employee can). This exists specifically to gate the new Daftra Client → Notebook Client migration workflow (`convertDaftraClientToNotebook`/`disableDaftraClient`, `Migrations.gs`) — both actions independently re-check this role server-side, not just in the frontend (`employee-debts-app`'s `debtCardHtml()` only uses the role to decide whether to show the buttons).
