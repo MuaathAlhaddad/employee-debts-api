@@ -10,6 +10,14 @@ Each entry: date, decision, why, where it's enforced/relevant in code.
 
 ---
 
+## 2026-09-09 — Optional note field wired up for Notebook (Short) debtor payments, matching what invoices already supported
+
+**Decision:** `recordDebtPayment()` (`Debts.gs`) now takes a trailing optional `note` param, forwarded into `logShortTransaction_()` the same way `addToShortDebt()` (Add invoice) already did. `employee-debts-app`'s "Add Payment" form for a Notebook debtor now shows the same optional "Note" text input the "Add invoice" form has always had; both flow into the Short Debtor Transactions ledger and show up in that entry's `description` on the client's account statement.
+
+**Why:** `addToShortDebt()` already accepted and recorded a note server-side, but nothing in the UI ever collected one, and the payment side didn't even have the parameter — a real feature gap rather than a deliberate omission (no prior decision here to reverse). Long debtors are untouched: `addLongDebtorPayment`/`addLongDebtorInvoice` already had their own note support via the separate "Client account" panel.
+
+**How to apply:** Any new Short-debtor money-recording action should take the same optional trailing `note` param and pass it straight to `logShortTransaction_()` rather than inventing a separate free-text log entry — that's the convention `recordDebtPayment()`'s own comment above already establishes for why Short debtors don't get a text note in the Debts Snapshot log.
+
 ## 2026-09-09 — Notebook client's opening balance IS carried over from the Daftra client, reversing this feature's original spec
 
 **Decision:** `convertDaftraClientToNotebook()` (`Migrations.gs`) now seeds the new Notebook client's Amount Owed with the Daftra client's current balance at conversion time, logged as a real "debt_added" Short Debtor Transaction (`Migrated from Daftra client #<id>`) so it shows up in that client's own account statement, not as an unexplained number.

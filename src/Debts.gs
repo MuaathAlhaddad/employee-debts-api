@@ -212,7 +212,7 @@ function addDebtFollowUp(employeeName, employeePin, clientId, note) {
 // what's owed, auto-marks "paid" once nothing's left). For Long Debtors,
 // this is separate from -- and doesn't replace -- actually recording the
 // payment in Daftra itself; see addLongDebtorPayment() below for that.
-function recordDebtPayment(employeeName, employeePin, clientId, amount) {
+function recordDebtPayment(employeeName, employeePin, clientId, amount, note) {
     const employee = requireEditAccess_(employeeName, employeePin);
     const amt = Number(amount);
 
@@ -246,7 +246,7 @@ function recordDebtPayment(employeeName, employeePin, clientId, amount) {
     // what drives the "Today" chase-list filter regardless of type.
     if (values[2] === "Short") {
         touchLastFollowUp_(sheet, row);
-        logShortTransaction_(clientId, values[0], "payment", -applied, newRemaining, employee.name, "");
+        logShortTransaction_(clientId, values[0], "payment", -applied, newRemaining, employee.name, note || "");
     } else {
         appendDebtLogEntry_(sheet, row, values, employee.name, `Payment received: ${applied} (remaining ${newRemaining})`);
     }
