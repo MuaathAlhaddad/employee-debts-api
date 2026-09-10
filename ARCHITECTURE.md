@@ -95,6 +95,37 @@ Lets the Owner move a client's debt tracking from a real Daftra client (a "Long"
 
 Both actions require the `"owner"` role (`requireOwnerAccess_()`, Employees.gs) — a real per-employee role, not a name check; see `DECISIONS.md`'s 2026-09-08 entries for why this role was added (superseding the 2026-09-05 "no owner tier" decision) and for the balance-clearing trade-off. The "Client Migrations" sheet doubles as this feature's audit trail (every field the feature needed to log lives on one row: both client IDs/names, status, created/disabled at/by, the balance actually cleared, the new Daftra name, the Daftra payment id).
 
+## Owner-only Notebook deletion + Notebook tags (added 2026-09-10)
+
+**Deletion.** Only the `"owner"` role (`requireOwnerAccess_()`, Employees.gs) can delete a Notebook
+(Short) client, one of their Notebook payments, or one of their Notebook invoices -- never a hard
+delete. `deleteShortDebt()`/`restoreShortDebt()` (Debts.gs) toggle `Deleted At`/`Deleted By` on the
+Debts Snapshot row (two new trailing columns, `DEBTS_HEADERS`); `deleteShortTransaction()`/
+`restoreShortTransaction()` do the same on the matching row in Short Debtor Transactions (three new
+trailing columns: `ID`, `Deleted At`, `Deleted By`). `getDebtsList()`/`getShortDebtorTransactions()`
+both filter out anything with a `Deleted At` set, so a deleted record disappears from every normal
+list/total but the row itself is never removed -- restoring is a real, working, symmetric action
+(not wired into the frontend UI yet, but complete and tested server-side). Deleting/restoring a
+transaction also reverses/reapplies its effect on the parent client's stored `Amount Owed`/
+`Amount Paid`, since those are running totals, not derived by summing the ledger on every read --
+see `deleteShortTransaction()`'s own comment for the exact clamp behavior on the one edge case this
+doesn't fully replay (a later transaction still depending on the one being deleted).
+
+Both the client-level and transaction-level actions require running `migrateNotebookDeletionAndTags()`
+(Migrations.gs) once, before deploying, so the new columns actually exist on the real sheets --
+`refreshDebtsSnapshot()` refuses to run against a header layout it doesn't recognize (see that
+function's own comment), and the delete/restore actions write to fixed column numbers directly.
+
+**Notebook tags.** Reusable tags/categories for Notebook (Short) clients only -- two new sheets
+(`Tags.gs`): "Notebook Tags" (the registry: id/name) and "Notebook Client Tags" (the many-to-many
+assignment: one row per client-id/tag-id pair), the same "dedicated sheet per relation" pattern as
+Client Migrations/Short Debtor Transactions, not a comma-separated or JSON-blob column. Viewing/
+filtering is open to any logged-in employee; create/rename/assign/remove need edit access
+(`requireEditAccess_()` -- not owner-only, unlike deletion). `getDebtsList()` attaches each Short
+client's own tags (`getClientTagsMap_()`) the same one-call way `getClientMigrationsMap_()` attaches
+migration state to Long debtors; `syncBundle()` additionally bundles the full tag registry so the
+frontend's filter row and "assign an existing tag" picker work from the synced cache.
+
 ## Where to look next
 
 - `CLAUDE.md` — file-by-file architecture detail and non-obvious Daftra-integration gotchas for

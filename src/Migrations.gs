@@ -164,6 +164,9 @@ function convertDaftraClientToNotebook(employeeName, employeePin, daftraClientId
         JSON.stringify(log),
         now, // Snapshot Time
         "", // Creditor
+        false, // Needs Reconciliation
+        "", // Deleted At
+        "", // Deleted By
     ]);
 
     // Structured Short Debtor Transactions row, same as any other new debt
@@ -305,4 +308,92 @@ function disableDaftraClient(employeeName, employeePin, daftraClientId, newDaftr
         notebookClientId: migration.values[2],
         notebookClientName: migration.values[3],
     };
+}
+
+// ============================================================
+// One-off schema migration -- Owner-only Notebook deletion (soft delete)
+// + Notebook tags (2026-09-10). Run ONCE from the Apps Script editor
+// (function dropdown -> migrateNotebookDeletionAndTags -> Run) BEFORE
+// deploying the rest of this change, and before running
+// refreshDebtsSnapshot()/"Refresh from Daftra" again.
+//
+// Why this has to run first: refreshDebtsSnapshot() (Daftra.gs) refuses
+// to run at all if the Debts Snapshot sheet's on-disk header row doesn't
+// match DEBTS_HEADERS (a prefix match, not exact -- see that function's
+// own comment for the 2026-08-29 incident this check exists to prevent).
+// DEBTS_HEADERS now includes "Deleted At"/"Deleted By", so the two new
+// columns must exist on the real sheet before that function -- or
+// deleteShortDebt()/restoreShortDebt() (Debts.gs), which write to those
+// same column numbers directly -- are safe to call.
+// ============================================================
+
+function migrateNotebookDeletionAndTags() {
+    const results = [
+        migrateDebtsSnapshotDeletionColumns_(),
+        migrateShortTransactionSchema_(),
+        ensureNotebookTagSheets_(),
+    ];
+
+    Logger.log(results.join("\n"));
+    return results;
+}
+
+// Appends whatever's missing from DEBTS_HEADERS (currently just "Deleted
+// At"/"Deleted By") to the Debts Snapshot header row. Existing rows don't
+// need their cells touched -- an unwritten cell already reads back as ""
+// via getValues(), which is exactly what "not deleted" means here.
+function migrateDebtsSnapshotDeletionColumns_() {
+    const sheet = getDebtsSheet_();
+    const lastCol = sheet.getLastColumn();
+
+    if (lastCol >= DEBTS_HEADERS.length) {
+        return "Debts Snapshot: already has Deleted At/Deleted By -- nothing to do.";
+    }
+
+    const missing = DEBTS_HEADERS.slice(lastCol);
+    sheet.getRange(1, lastCol + 1, 1, missing.length).setValues([missing]).setFontWeight("bold");
+    return `Debts Snapshot: added column(s) ${missing.join(", ")}.`;
+}
+
+// Appends whatever's missing from SHORT_TX_HEADERS (ID / Deleted At /
+// Deleted By) to the Short Debtor Transactions header row, THEN backfills
+// a real ID for every existing row that doesn't already have one --
+// unlike the Debts Snapshot columns above, a blank ID isn't equivalent to
+// "not deletable," it's just unaddressable, so old rows need a real value
+// written, not just a default left blank.
+function migrateShortTransactionSchema_() {
+    const sheet = getShortTransactionsSheet_();
+    const lastCol = sheet.getLastColumn();
+
+    if (lastCol < SHORT_TX_HEADERS.length) {
+        const missing = SHORT_TX_HEADERS.slice(lastCol);
+        sheet.getRange(1, lastCol + 1, 1, missing.length).setValues([missing]).setFontWeight("bold");
+    }
+
+    const lastRow = sheet.getLastRow();
+    if (lastRow <= 1) return "Short Debtor Transactions: no existing rows to backfill.";
+
+    const idCol = SHORT_TX_HEADERS.indexOf("ID") + 1;
+    const ids = sheet.getRange(2, idCol, lastRow - 1, 1).getValues();
+    let backfilled = 0;
+
+    ids.forEach((row, i) => {
+        if (!row[0]) {
+            sheet.getRange(2 + i, idCol).setValue(Utilities.getUuid());
+            backfilled++;
+        }
+    });
+
+    return `Short Debtor Transactions: backfilled ${backfilled} missing ID(s) out of ${ids.length} row(s).`;
+}
+
+// Notebook Tags / Notebook Client Tags (Tags.gs) already lazily
+// insertSheet() themselves on first use, same as every other feature
+// sheet in this codebase -- this just creates them up front so they show
+// up in the spreadsheet immediately rather than after the first tag is
+// created, and so this migration's result list documents that they exist.
+function ensureNotebookTagSheets_() {
+    getNotebookTagsSheet_();
+    getNotebookClientTagsSheet_();
+    return "Notebook Tags / Notebook Client Tags sheets ready (created if missing).";
 }

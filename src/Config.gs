@@ -21,6 +21,13 @@ const CONFIG = {
         // Daftra Client -> Notebook Client migration links (2026-09-08) --
         // see Migrations.gs.
         CLIENT_MIGRATIONS: "Client Migrations",
+        // Notebook tags (2026-09-10) -- see Tags.gs. NOTEBOOK_TAGS is the
+        // tag registry (id/name), NOTEBOOK_CLIENT_TAGS is the many-to-many
+        // assignment sheet (client id / tag id), same "dedicated sheet for
+        // a relation" pattern as CLIENT_MIGRATIONS/SHORT_TRANSACTIONS above
+        // rather than a comma-separated/JSON blob on the Debts Snapshot row.
+        NOTEBOOK_TAGS: "Notebook Tags",
+        NOTEBOOK_CLIENT_TAGS: "Notebook Client Tags",
     },
 
     DEBT_STATUS: {

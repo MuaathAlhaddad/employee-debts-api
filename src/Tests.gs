@@ -121,6 +121,126 @@ function runSmokeTests(employeeName, employeePin) {
         );
     });
 
+    check("Notebook deletion: transaction delete reverses balance, restore reapplies it", () => {
+        const sheet = getDebtsSheet_();
+        const before = loadDebtRow_(sheet, TEST_SHORT_CLIENT_ID).values;
+        const owedBefore = Number(before[3]) || 0;
+
+        addToShortDebt(employeeName, employeePin, TEST_SHORT_CLIENT_ID, 7, "smoke test -- deletion round trip", "");
+
+        const tx = getShortDebtorTransactions(employeeName, employeePin, TEST_SHORT_CLIENT_ID);
+        const created = tx.entries[0];
+        if (!created || !created.id || created.type !== "debt_added" || created.amount !== 7) {
+            throw new Error("expected a fresh debt_added transaction with a real id: " + JSON.stringify(created));
+        }
+
+        const afterAdd = loadDebtRow_(sheet, TEST_SHORT_CLIENT_ID).values;
+        if ((Number(afterAdd[3]) || 0) !== owedBefore + 7) {
+            throw new Error(`Amount Owed after add is ${afterAdd[3]}, expected ${owedBefore + 7}`);
+        }
+
+        const del = deleteShortTransaction(employeeName, employeePin, created.id);
+        if (!del.success || del.alreadyDeleted) {
+            throw new Error("delete didn't report a fresh success: " + JSON.stringify(del));
+        }
+
+        const afterDelete = loadDebtRow_(sheet, TEST_SHORT_CLIENT_ID).values;
+        if ((Number(afterDelete[3]) || 0) !== owedBefore) {
+            throw new Error(`Amount Owed after delete is ${afterDelete[3]}, expected it back to ${owedBefore}`);
+        }
+
+        const txAfterDelete = getShortDebtorTransactions(employeeName, employeePin, TEST_SHORT_CLIENT_ID);
+        if (txAfterDelete.entries.some((e) => e.id === created.id)) {
+            throw new Error("deleted transaction still shows up in getShortDebtorTransactions()");
+        }
+
+        const restore = restoreShortTransaction(employeeName, employeePin, created.id);
+        if (!restore.success || restore.alreadyRestored) {
+            throw new Error("restore didn't report a fresh success: " + JSON.stringify(restore));
+        }
+
+        const afterRestore = loadDebtRow_(sheet, TEST_SHORT_CLIENT_ID).values;
+        if ((Number(afterRestore[3]) || 0) !== owedBefore + 7) {
+            throw new Error(`Amount Owed after restore is ${afterRestore[3]}, expected ${owedBefore + 7}`);
+        }
+
+        // Leave the test client's balance exactly where this check found
+        // it -- delete again (permanently, for this test's purposes) so
+        // the restore above doesn't leave a net +7 behind on every run.
+        const finalDelete = deleteShortTransaction(employeeName, employeePin, created.id);
+        if (!finalDelete.success) throw new Error("final cleanup delete failed: " + JSON.stringify(finalDelete));
+    });
+
+    check("Notebook deletion: client soft delete hides it from getDebtsList, restore brings it back", () => {
+        const before = getDebtsList(employeeName, employeePin);
+        if (!before.short.some((d) => d.clientId === TEST_SHORT_CLIENT_ID)) {
+            throw new Error("test client should be visible before this check even starts");
+        }
+
+        const del = deleteShortDebt(employeeName, employeePin, TEST_SHORT_CLIENT_ID);
+        if (!del.success || del.alreadyDeleted) {
+            throw new Error("delete didn't report a fresh success: " + JSON.stringify(del));
+        }
+
+        const afterDelete = getDebtsList(employeeName, employeePin);
+        if (afterDelete.short.some((d) => d.clientId === TEST_SHORT_CLIENT_ID)) {
+            throw new Error("soft-deleted test client still shows up in getDebtsList()");
+        }
+
+        // The ledger itself must survive the client-level delete untouched.
+        const txWhileDeleted = getShortDebtorTransactions(employeeName, employeePin, TEST_SHORT_CLIENT_ID);
+        if (txWhileDeleted.entries.length === 0) {
+            throw new Error("Short Debtor Transactions history disappeared while the client was soft-deleted");
+        }
+
+        const restore = restoreShortDebt(employeeName, employeePin, TEST_SHORT_CLIENT_ID);
+        if (!restore.success || restore.alreadyRestored) {
+            throw new Error("restore didn't report a fresh success: " + JSON.stringify(restore));
+        }
+
+        const afterRestore = getDebtsList(employeeName, employeePin);
+        if (!afterRestore.short.some((d) => d.clientId === TEST_SHORT_CLIENT_ID)) {
+            throw new Error("restored test client doesn't show back up in getDebtsList()");
+        }
+    });
+
+    check("Notebook tags: create/assign/view/remove round trip", () => {
+        // Reuses the same tag across runs (createNotebookTag is idempotent
+        // by name) rather than creating a fresh one every time -- there is
+        // no tag-delete action anywhere in this API (deliberately, per this
+        // feature's spec: only create/rename), so a brand-new tag per run
+        // would permanently accumulate in the registry. This one stays in
+        // "Notebook Tags" between runs, same "not fully self-cleaning, and
+        // that's expected" caveat this file's other Short-debtor checks
+        // already carry -- it's just never left ASSIGNED to the test
+        // client afterward (removed at the end of this check).
+        const tag = createNotebookTag(employeeName, employeePin, "TEST - smoke test tag (safe to ignore)");
+        if (!tag.id) throw new Error("createNotebookTag didn't return an id: " + JSON.stringify(tag));
+
+        const allTags = getNotebookTags(employeeName, employeePin);
+        if (!allTags.some((t) => t.id === tag.id)) {
+            throw new Error("new tag doesn't show up in getNotebookTags()");
+        }
+
+        const assign = assignNotebookTag(employeeName, employeePin, TEST_SHORT_CLIENT_ID, tag.id);
+        if (!assign.success) throw new Error("assignNotebookTag failed: " + JSON.stringify(assign));
+
+        const debts = getDebtsList(employeeName, employeePin);
+        const client = debts.short.find((d) => d.clientId === TEST_SHORT_CLIENT_ID);
+        if (!client || !client.tags || !client.tags.some((t) => t.id === tag.id)) {
+            throw new Error("assigned tag doesn't show up on the test client's getDebtsList() entry: " + JSON.stringify(client && client.tags));
+        }
+
+        const remove = removeNotebookTag(employeeName, employeePin, TEST_SHORT_CLIENT_ID, tag.id);
+        if (!remove.success) throw new Error("removeNotebookTag failed: " + JSON.stringify(remove));
+
+        const debtsAfter = getDebtsList(employeeName, employeePin);
+        const clientAfter = debtsAfter.short.find((d) => d.clientId === TEST_SHORT_CLIENT_ID);
+        if (clientAfter && clientAfter.tags && clientAfter.tags.some((t) => t.id === tag.id)) {
+            throw new Error("removed tag still shows up on the test client after removeNotebookTag()");
+        }
+    });
+
     check("Migration: convert creates a Notebook client, repeat call doesn't duplicate", () => {
         const migrationsSheet = getClientMigrationsSheet_();
         const debtsSheet = getDebtsSheet_();
@@ -153,9 +273,17 @@ function runSmokeTests(employeeName, employeePin) {
     //   - Owner-only rejection for a non-owner employee -- runSmokeTests
     //     only ever runs as one identity (see the curl example in
     //     CLAUDE.md), so there's no second non-owner credential available
-    //     to call convertDaftraClientToNotebook/disableDaftraClient with
-    //     and confirm they throw. Test this by hand once with a real
-    //     edit-role (non-owner) PIN.
+    //     to call convertDaftraClientToNotebook/disableDaftraClient/
+    //     deleteShortDebt/deleteShortTransaction with and confirm they
+    //     throw for anything other than the "owner" role. Test this by
+    //     hand once with a real edit-role (non-owner) PIN AND a real
+    //     view-role PIN -- both must be rejected with "Only the shop owner
+    //     can do that."
+    //   - Edit-role rejection for a view-only employee calling
+    //     createNotebookTag/renameNotebookTag/assignNotebookTag/
+    //     removeNotebookTag -- same reason (only one identity available
+    //     here). Test by hand with a real view-role PIN; expect
+    //     "You have view-only access and can't make changes."
     //   - disableDaftraClient()'s balance-clear + rename/suspend, end to
     //     end -- gated on testClientRenameSuspendRoundTrip() below passing
     //     first (the rename/suspend field-name guess needs manual

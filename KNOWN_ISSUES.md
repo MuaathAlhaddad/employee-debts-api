@@ -72,6 +72,24 @@ Same decision, requirement 7. No action in `Api.gs` has any duplicate-submission
 Needs research into Daftra's own API for a client-supplied reference/idempotency mechanism before
 this can be designed properly. **Not yet implemented.**
 
+## GAP (documented 2026-09-10, deliberate) — Notebook deletion has no restore UI, and no idempotency issue on retry, but a known replay limitation
+
+**Restore has no frontend UI yet.** `restoreShortDebt()`/`restoreShortTransaction()` (Debts.gs) are
+real, tested, whitelisted API actions — not stubs — but nothing in `employee-debts-app` calls them.
+Today, an owner who deletes a Notebook client/payment/invoice by mistake can only be restored via a
+direct API call (`curl`, same shape as the `runSmokeTests` example in `CLAUDE.md`) until a "trash"
+browsing UI is built. Not urgent — the data is never actually lost — but worth knowing before
+telling anyone "you can undo this" without also knowing how, today.
+
+**Known limitation, not a bug:** `deleteShortTransaction()`/`restoreShortTransaction()` reverse/
+reapply only the ONE transaction being toggled, not a full replay of the client's whole Short Debtor
+Transactions history. See `DECISIONS.md`'s 2026-09-10 entry for why this was chosen deliberately
+(the reopen-reset behavior in `addShortDebt()` makes a naive full-ledger-sum replay actively wrong,
+not just slower) and the exact clamp behavior for the one edge case it doesn't handle perfectly
+(deleting an old transaction after a later one already depended on it). If this ever becomes a real
+problem in practice, the fix is a proper replay that's aware of the reopen boundary, not a naive
+sum.
+
 ## Cross-reference — Long debtor card staleness investigation (owned by `employee-debts-app`)
 
 An open bug where a Long debtor's card doesn't reflect a payment/invoice until a full "Refresh

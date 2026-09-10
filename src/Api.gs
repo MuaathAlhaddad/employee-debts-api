@@ -53,6 +53,23 @@ const API_ACTIONS = {
     convertDaftraClientToNotebook,
     disableDaftraClient,
 
+    // Notebook deletion -- Owner-only soft delete (each re-checks the
+    // role server-side; not just hidden in the frontend). Restore
+    // actions exist and are real/complete, just not wired into the UI yet.
+    deleteShortDebt,
+    restoreShortDebt,
+    deleteShortTransaction,
+    restoreShortTransaction,
+
+    // Notebook tags -- viewing is open to any logged-in employee;
+    // create/rename/assign/remove require edit access (each re-checks
+    // server-side).
+    getNotebookTags,
+    createNotebookTag,
+    renameNotebookTag,
+    assignNotebookTag,
+    removeNotebookTag,
+
     // Product search
     searchProducts,
     getProductPurchaseHistory,

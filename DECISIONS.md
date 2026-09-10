@@ -10,6 +10,79 @@ Each entry: date, decision, why, where it's enforced/relevant in code.
 
 ---
 
+## 2026-09-10 — Owner-only Notebook deletion is a soft delete with real restore support, not a hard delete
+
+**Decision:** `deleteShortDebt()`/`deleteShortTransaction()` (Debts.gs) never remove a row. They set
+`Deleted At`/`Deleted By` on the existing row (two new trailing columns on Debts Snapshot for
+clients, three -- `ID`/`Deleted At`/`Deleted By` -- on Short Debtor Transactions for payments/
+invoices, since those never had an individually addressable id before). `getDebtsList()`/
+`getShortDebtorTransactions()` filter out anything with `Deleted At` set, so deleted records
+disappear from every normal list/total, but `restoreShortDebt()`/`restoreShortTransaction()` are
+real, complete, tested actions that clear the flag and (for a transaction) reapply its effect on
+the parent's balance. Both pairs require the `"owner"` role server-side (`requireOwnerAccess_()`),
+re-checked independently of whatever the frontend hides.
+
+**Why:** Direct requirement of this feature's spec -- "Design the data model so records can be
+restored later," and financial records (a debtor's payment/invoice history) are exactly the kind of
+data where an accidental or malicious hard delete is unacceptable. Soft delete plus real restore
+functions (even without a "trash" browsing UI in the frontend yet) satisfies that without needing a
+second migration later to retrofit restorability.
+
+**How to apply:** Never build a hard-delete path for a Notebook client/payment/invoice without a
+new explicit decision here overriding this one. `migrateNotebookDeletionAndTags()` (Migrations.gs)
+must be run once, by hand, from the Apps Script editor before deploying this feature or running
+`refreshDebtsSnapshot()` again -- see that function's own header comment and `ARCHITECTURE.md`'s
+matching section for why.
+
+## 2026-09-10 — Deleting a Notebook payment/invoice reverses its effect on the stored balance directly, not via a full ledger replay
+
+**Decision:** `deleteShortTransaction()`/`restoreShortTransaction()` (Debts.gs) adjust the parent
+client's `Amount Owed`/`Amount Paid` by exactly the one transaction being toggled (add back what a
+payment applied; subtract what a debt_added added, clamped so `Amount Owed` never drops below
+`Amount Paid`), rather than recomputing the client's balance from scratch by summing every
+non-deleted Short Debtor Transaction row for that client.
+
+**Why:** A full replay is the more "obviously correct" design in the abstract, but Short debtor
+balances aren't purely additive across this codebase's own history -- `addShortDebt()`'s reopen path
+(a resolved debtor coming back for a new debt) resets `Amount Owed`/`Amount Paid` outright rather
+than adding on top of the old cycle, so a naive sum-the-ledger replay would incorrectly pull old,
+already-closed-cycle transactions back into the current balance. Reversing only the one transaction
+being deleted/restored is correct for the intended use (undoing a just-made mistake) and doesn't
+require teaching this function about the reopen boundary.
+
+**How to apply:** This assumes no *other* transaction for the same client has been added or deleted
+since the one being toggled -- true for "I just fat-fingered an amount, undo it," not necessarily
+true for deleting an old transaction out of order after later ones already happened. See
+`deleteShortTransaction()`'s own comment for the exact clamp chosen for that edge case (Owed floored
+at Paid, not allowed to go negative-remaining). Don't "fix" this into a full replay without first
+confirming the reopen-reset behavior above is accounted for -- that's the reason this design was
+chosen over the more obvious one.
+
+## 2026-09-10 — Notebook tags: a dedicated relation sheet, not a comma-separated/JSON column; viewing is universal, mutating needs edit access
+
+**Decision:** Tags for Notebook (Short) clients live in two new sheets (`Tags.gs`): "Notebook Tags"
+(id/name registry) and "Notebook Client Tags" (one row per client-id/tag-id assignment) -- the same
+"dedicated sheet per relation" pattern this codebase already uses for Client Migrations and Short
+Debtor Transactions, not a comma-separated list or a JSON blob stuffed into a Debts Snapshot column.
+`getNotebookTags()` (view) only requires `authenticateEmployee()` -- any logged-in employee, view or
+edit role; `createNotebookTag()`/`renameNotebookTag()`/`assignNotebookTag()`/`removeNotebookTag()`
+all require `requireEditAccess_()`. This is deliberately **not** owner-gated, unlike Notebook
+deletion in the same feature.
+
+**Why:** Explicit spec requirement ("clean data model that fits the existing architecture... do not
+store tags as comma-separated text unless that is already the established pattern" -- it isn't; the
+one JSON-in-a-cell precedent in this codebase, the per-debtor `Log` column, is a free-text history,
+not a relational many-to-many, so a dedicated sheet was judged the better fit). The view/edit access
+split matches every other read/write pair in this app (e.g. `getShortDebtorTransactions()` is
+open to everyone, only the writes that create rows are edit-gated) -- there was no stated reason to
+make tags stricter than the rest of the Notebook feature.
+
+**How to apply:** There is no tag-deletion action (only create/rename) -- don't add one without a
+new decision here; `getClientTagsMap_()`'s dangling-assignment guard exists specifically because it
+assumes tag ids are never removed from the registry once created.
+
+---
+
 ## 2026-09-09 — Optional note field wired up for Notebook (Short) debtor payments, matching what invoices already supported
 
 **Decision:** `recordDebtPayment()` (`Debts.gs`) now takes a trailing optional `note` param, forwarded into `logShortTransaction_()` the same way `addToShortDebt()` (Add invoice) already did. `employee-debts-app`'s "Add Payment" form for a Notebook debtor now shows the same optional "Note" text input the "Add invoice" form has always had; both flow into the Short Debtor Transactions ledger and show up in that entry's `description` on the client's account statement.

@@ -1092,6 +1092,16 @@ const DEBTS_HEADERS = [
     // that can't be automated) -- this is a plain owner-set marker,
     // shown as a warning tag on the card, cleared by hand once resolved.
     "Needs Reconciliation",
+    // Owner-only soft delete (2026-09-10, deleteShortDebt()/restoreShortDebt()
+    // in Debts.gs) -- Notebook (Short) clients only; always blank for Long
+    // debtors. A non-empty Deleted At is what makes a row disappear from
+    // getDebtsList()'s normal lists/total -- the row itself is never
+    // removed, so it can be restored and its Short Debtor Transactions
+    // history stays intact. See Migrations.gs's
+    // migrateDebtsSnapshotDeletionColumns_() for the one-off migration
+    // that must run once before this column exists on the real sheet.
+    "Deleted At",
+    "Deleted By",
 ];
 
 function refreshDebtsSnapshot() {
@@ -1227,6 +1237,12 @@ function refreshDebtsSnapshot() {
             now,
             prev.creditor || "",
             prev.needsReconciliation || false,
+            // Deleted At / Deleted By -- the Owner-only soft-delete feature
+            // (Debts.gs's deleteShortDebt()) only ever applies to Notebook
+            // (Short) clients, which this function never touches (shortRows
+            // are carried forward untouched, below). Always blank here.
+            "",
+            "",
         ];
     });
 

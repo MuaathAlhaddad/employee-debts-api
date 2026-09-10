@@ -15,10 +15,18 @@ function syncBundle(employeeName, employeePin) {
 
     const debts = getDebtsList(employeeName, employeePin);
     const products = getAllProducts();
+    // Full tag registry (2026-09-10) -- bundled the same one-call way as
+    // debts/products so the tag filter row and "add existing tag" picker
+    // work straight from the synced cache, no extra round trip. Each
+    // Short debtor's OWN assigned tags already come back on debts.short
+    // (see getDebtsList()'s getClientTagsMap_() attachment); this is the
+    // full registry, including tags nothing is currently tagged with.
+    const tags = getNotebookTags_();
 
     return {
         debts,
         products,
+        tags,
         syncedAt: new Date().toISOString(),
     };
 }

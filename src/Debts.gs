@@ -104,6 +104,13 @@ function rowToDebt_(row) {
         // instead, shown as a warning tag until cleared by hand.
         needsReconciliation: row[14] === true,
         isAgingShort,
+        // Owner-only soft delete (2026-09-10) -- Notebook (Short) clients
+        // only. Truthy here means this row is filtered out of
+        // getDebtsList()'s returned long/short arrays and total (see
+        // below); the row itself is left in place so it can be restored
+        // and its Short Debtor Transactions history stays intact.
+        deletedAt: row[15] || "",
+        deletedBy: row[16] || "",
     };
 }
 
@@ -126,7 +133,13 @@ function getDebtsList(employeeName, employeePin) {
 
     const debts = rows
         .filter((row) => row[1] !== "" && row[1] != null)
-        .map(rowToDebt_);
+        .map(rowToDebt_)
+        // Owner-deleted Notebook clients disappear from every normal list
+        // and from the outstanding total (2026-09-10) -- the row still
+        // exists on disk (deleteShortDebt() in this file never removes it),
+        // just never returned here. Only Short rows can ever have
+        // deletedAt set (deleteShortDebt() refuses to touch a Long row).
+        .filter((d) => !d.deletedAt);
 
     const long = debts.filter((d) => d.type !== "Short").sort((a, b) => b.amount - a.amount);
     const short = debts.filter((d) => d.type === "Short").sort((a, b) => b.amount - a.amount);
@@ -138,6 +151,13 @@ function getDebtsList(employeeName, employeePin) {
     const migrations = getClientMigrationsMap_();
     long.forEach((d) => {
         d.migration = migrations[d.clientId] || null;
+    });
+
+    // Notebook tags (2026-09-10) -- same one-call-bundling reasoning as
+    // migrations above. Only ever meaningful for Short (Notebook) debtors.
+    const tags = getClientTagsMap_();
+    short.forEach((d) => {
+        d.tags = tags[d.clientId] || [];
     });
 
     const outstanding = (d) => (d.status === CONFIG.DEBT_STATUS.ACTIVE ? d.amount - d.amountPaid : 0);
@@ -401,6 +421,21 @@ function addShortDebt(employeeName, employeePin, debtorName, amount, phone, dueD
                 JSON.stringify(log),
                 now,
                 String(creditor || "").trim() || existing.values[13] || "",
+                // Needs Reconciliation -- preserved, same "carry the old
+                // value forward" convention as Creditor above. This array's
+                // width must match DEBTS_HEADERS.length exactly or
+                // setValues() throws "number of columns... does not match"
+                // -- this field was previously missing entirely (a
+                // pre-existing latent bug: 14 values against a 15-wide
+                // range), which would have thrown on any reopen of a
+                // resolved Short debtor. Fixed here while extending this
+                // array for Deleted At/By below.
+                existing.values[14] === true,
+                // Deleted At / Deleted By -- a repeat debtor reopening this
+                // row is a fresh, active debt; clear any prior soft-delete
+                // rather than leaving a reopened row invisible.
+                "",
+                "",
             ],
         ]);
 
@@ -436,6 +471,9 @@ function addShortDebt(employeeName, employeePin, debtorName, amount, phone, dueD
         JSON.stringify(log),
         now,
         String(creditor || "").trim(),
+        false, // Needs Reconciliation
+        "", // Deleted At
+        "", // Deleted By
     ]);
 
     logShortTransaction_(clientId, name, "debt_added", value, value, employee.name, notes || "");
@@ -573,7 +611,26 @@ function editShortDebt(employeeName, employeePin, clientId, debtorName, amount, 
 // existing history before this sheet existed is NOT backfilled.
 // ============================================================
 
-const SHORT_TX_HEADERS = ["Date", "Time", "Client ID", "Client Name", "Type", "Amount", "Remaining", "Actor", "Note"];
+const SHORT_TX_HEADERS = [
+    "Date",
+    "Time",
+    "Client ID",
+    "Client Name",
+    "Type",
+    "Amount",
+    "Remaining",
+    "Actor",
+    "Note",
+    // ID / Deleted At / Deleted By (2026-09-10) -- what makes an individual
+    // Short Debtor Transaction (a "Notebook payment"/"Notebook invoice")
+    // individually addressable for deleteShortTransaction() below. Rows
+    // written before this existed have a blank ID until
+    // migrateShortTransactionSchema_() (Migrations.gs) backfills one --
+    // run that once before relying on deletion for old rows.
+    "ID",
+    "Deleted At",
+    "Deleted By",
+];
 
 function getShortTransactionsSheet_() {
     const ss = getSheet_();
@@ -588,17 +645,48 @@ function getShortTransactionsSheet_() {
     return sheet;
 }
 
+function findShortTransactionRow_(sheet, transactionId) {
+    const lastRow = sheet.getLastRow();
+    if (lastRow <= 1) return null;
+
+    const idCol = SHORT_TX_HEADERS.indexOf("ID") + 1;
+    const ids = sheet.getRange(2, idCol, lastRow - 1, 1).getValues();
+
+    for (let i = 0; i < ids.length; i++) {
+        if (ids[i][0] !== "" && String(ids[i][0]) === String(transactionId)) {
+            return { row: 2 + i, values: sheet.getRange(2 + i, 1, 1, SHORT_TX_HEADERS.length).getValues()[0] };
+        }
+    }
+
+    return null;
+}
+
 // amount is signed (+ debt added, - payment); remaining is the debtor's
 // Amount Owed minus Amount Paid immediately after this event.
 function logShortTransaction_(clientId, clientName, type, amount, remaining, actor, note) {
     const sheet = getShortTransactionsSheet_();
     const now = new Date();
 
-    sheet.appendRow([todayStr_(), now.toISOString(), clientId, clientName, type, amount, remaining, actor, note || ""]);
+    sheet.appendRow([
+        todayStr_(),
+        now.toISOString(),
+        clientId,
+        clientName,
+        type,
+        amount,
+        remaining,
+        actor,
+        note || "",
+        Utilities.getUuid(),
+        "", // Deleted At
+        "", // Deleted By
+    ]);
 }
 
 // Any logged-in employee can view -- matches getLongDebtorAccount()'s
 // access level (only the writes that create these rows are edit-gated).
+// Soft-deleted entries (deleteShortTransaction() below) are excluded, same
+// as getDebtsList() excludes a soft-deleted Notebook client.
 function getShortDebtorTransactions(employeeName, employeePin, clientId) {
     authenticateEmployee(employeeName, employeePin);
 
@@ -609,9 +697,9 @@ function getShortDebtorTransactions(employeeName, employeePin, clientId) {
     const rows = sheet.getRange(2, 1, lastRow - 1, SHORT_TX_HEADERS.length).getValues();
 
     const entries = rows
-        .filter((row) => String(row[2]) === String(clientId))
+        .filter((row) => String(row[2]) === String(clientId) && !row[10])
         .map((row) => ({
-            id: null, // not individually editable -- these are local totals, not real Daftra records
+            id: row[9] || null, // real, stable id -- used by deleteShortTransaction()
             date: row[1] || row[0],
             type: row[4],
             description: (row[4] === "payment" ? "Payment received" : "Debt added") + (row[8] ? ` -- ${row[8]}` : ""),
@@ -622,6 +710,215 @@ function getShortDebtorTransactions(employeeName, employeePin, clientId) {
         .slice(0, 5);
 
     return { entries };
+}
+
+// ============================================================
+// Owner-only Notebook deletion (2026-09-10) -- soft delete only, never a
+// real row/sheet delete. Covers all three deletable Notebook entities:
+//   - a Notebook CLIENT (a Short debtor row, Debts Snapshot) --
+//     deleteShortDebt()/restoreShortDebt() below.
+//   - a Notebook PAYMENT or INVOICE (a "payment"/"debt_added" row in Short
+//     Debtor Transactions) -- deleteShortTransaction()/
+//     restoreShortTransaction() below.
+// Both pairs are symmetric (delete sets Deleted At/By, restore clears
+// them) so the data model supports restoring a mistaken deletion --
+// restore has no UI wiring yet in employee-debts-app, but the API is real
+// and complete, not a stub.
+//
+// Deleting/restoring a transaction also reverses/reapplies its effect on
+// the parent client's Amount Owed/Amount Paid, since those are stored
+// running totals on the Debts Snapshot row, not derived by summing
+// Short Debtor Transactions on every read. This assumes no OTHER
+// transaction for the same client has been added/deleted since the one
+// being toggled -- true for the intended use (undoing a just-made
+// mistake) but not a full replay/recompute across the whole ledger; see
+// this function's own comments for the exact clamp behavior chosen for
+// the edge case where that assumption doesn't hold.
+// ============================================================
+
+// Owner-only. Idempotent -- deleting an already-deleted client is a
+// success no-op, not an error (protects a retried/double-tapped request).
+function deleteShortDebt(employeeName, employeePin, clientId) {
+    const employee = requireOwnerAccess_(employeeName, employeePin);
+
+    const sheet = getDebtsSheet_();
+    const { row, values } = loadDebtRow_(sheet, clientId);
+
+    if (values[2] !== "Short") {
+        throw new Error("Only Notebook (Short) clients can be deleted this way -- Long (Daftra) debtors aren't covered by this feature.");
+    }
+
+    if (values[15]) {
+        // Already deleted -- idempotent no-op.
+        return { success: true, alreadyDeleted: true };
+    }
+
+    sheet.getRange(row, 16).setValue(new Date()); // Deleted At
+    sheet.getRange(row, 17).setValue(employee.name); // Deleted By
+
+    appendDebtLogEntry_(sheet, row, values, employee.name, "Deleted (Notebook client removed by owner)");
+
+    return { success: true, alreadyDeleted: false };
+}
+
+// Owner-only. The row's Short Debtor Transactions history was never
+// touched by deleteShortDebt() above, so it's intact the moment this
+// clears the flag -- nothing to "recompute."
+function restoreShortDebt(employeeName, employeePin, clientId) {
+    const employee = requireOwnerAccess_(employeeName, employeePin);
+
+    const sheet = getDebtsSheet_();
+    const { row, values } = loadDebtRow_(sheet, clientId);
+
+    if (values[2] !== "Short") {
+        throw new Error("Only Notebook (Short) clients can be restored this way.");
+    }
+
+    if (!values[15]) {
+        return { success: true, alreadyRestored: true };
+    }
+
+    sheet.getRange(row, 16).setValue(""); // Deleted At
+    sheet.getRange(row, 17).setValue(""); // Deleted By
+
+    appendDebtLogEntry_(sheet, row, values, employee.name, "Restored by owner");
+
+    return { success: true, alreadyRestored: false };
+}
+
+// Owner-only. Soft-deletes one Notebook payment or invoice (a single row
+// in Short Debtor Transactions) and reverses its effect on the parent
+// client's stored Amount Owed/Amount Paid -- see this section's header
+// comment for the replay caveat. transactionId comes from an entry in
+// getShortDebtorTransactions()'s result.
+function deleteShortTransaction(employeeName, employeePin, transactionId) {
+    const employee = requireOwnerAccess_(employeeName, employeePin);
+
+    const sheet = getShortTransactionsSheet_();
+    const found = findShortTransactionRow_(sheet, transactionId);
+
+    if (!found) {
+        throw new Error("That transaction wasn't found -- try refreshing first.");
+    }
+
+    if (found.values[10]) {
+        // Already deleted -- idempotent no-op.
+        return { success: true, alreadyDeleted: true };
+    }
+
+    const { row, values } = found;
+    const clientId = values[2];
+    const type = values[4];
+    const amount = Number(values[5]) || 0;
+
+    let newOwed = null;
+    let newPaid = null;
+
+    const debtsSheet = getDebtsSheet_();
+    const debtRow = findDebtRow_(debtsSheet, clientId);
+
+    if (debtRow) {
+        const debtValues = debtsSheet.getRange(debtRow, 1, 1, DEBTS_HEADERS.length).getValues()[0];
+        const owed = Number(debtValues[3]) || 0;
+        const paid = Number(debtValues[4]) || 0;
+
+        if (type === "payment") {
+            // amount is already negative (recordDebtPayment() logs it as
+            // -applied) -- adding it back to Paid undoes exactly what that
+            // payment applied. Floored at 0 as a defensive clamp only; a
+            // negative result shouldn't be reachable given amount is never
+            // larger in magnitude than the Paid it was applied against.
+            newPaid = Math.max(0, paid + amount);
+            debtsSheet.getRange(debtRow, 5).setValue(newPaid); // Amount Paid
+        } else if (type === "debt_added") {
+            // amount is positive -- reverse it by removing it from Owed.
+            // Clamped so Owed never drops below Paid, which would imply a
+            // negative remaining balance that no write path in this
+            // codebase ever produces -- reachable only if a payment was
+            // recorded AFTER this debt_added and is still in effect (this
+            // function doesn't replay the whole ledger, only reverses the
+            // one transaction being deleted); in that edge case Owed is
+            // clamped down to Paid instead of going below it, and the
+            // clamp is visible in the Log entry below via the actual
+            // before/after numbers.
+            newOwed = Math.max(paid, owed - amount);
+            debtsSheet.getRange(debtRow, 4).setValue(newOwed); // Amount Owed
+        }
+
+        appendDebtLogEntry_(
+            debtsSheet,
+            debtRow,
+            debtValues,
+            employee.name,
+            `Deleted ${type === "payment" ? "payment" : "invoice"} transaction of ${Math.abs(amount)} (owner) -- ${
+                type === "payment" ? `Amount Paid ${paid} -> ${newPaid}` : `Amount Owed ${owed} -> ${newOwed}`
+            }`,
+        );
+    }
+    // debtRow not found (e.g. the client row itself was deleted from the
+    // sheet some other way, outside this feature) -- the transaction is
+    // still marked deleted below; there's just no live balance to adjust.
+
+    sheet.getRange(row, 11).setValue(new Date()); // Deleted At
+    sheet.getRange(row, 12).setValue(employee.name); // Deleted By
+
+    return { success: true, alreadyDeleted: false, clientId, newOwed, newPaid };
+}
+
+// Owner-only. Reverses deleteShortTransaction() above -- reapplies the
+// transaction's effect on the parent client's Amount Owed/Amount Paid and
+// clears the Deleted At/By flag. Same replay caveat as delete.
+function restoreShortTransaction(employeeName, employeePin, transactionId) {
+    const employee = requireOwnerAccess_(employeeName, employeePin);
+
+    const sheet = getShortTransactionsSheet_();
+    const found = findShortTransactionRow_(sheet, transactionId);
+
+    if (!found) {
+        throw new Error("That transaction wasn't found -- try refreshing first.");
+    }
+
+    if (!found.values[10]) {
+        return { success: true, alreadyRestored: true };
+    }
+
+    const { row, values } = found;
+    const clientId = values[2];
+    const type = values[4];
+    const amount = Number(values[5]) || 0;
+
+    let newOwed = null;
+    let newPaid = null;
+
+    const debtsSheet = getDebtsSheet_();
+    const debtRow = findDebtRow_(debtsSheet, clientId);
+
+    if (debtRow) {
+        const debtValues = debtsSheet.getRange(debtRow, 1, 1, DEBTS_HEADERS.length).getValues()[0];
+        const owed = Number(debtValues[3]) || 0;
+        const paid = Number(debtValues[4]) || 0;
+
+        if (type === "payment") {
+            newPaid = Math.max(0, paid - amount);
+            debtsSheet.getRange(debtRow, 5).setValue(newPaid);
+        } else if (type === "debt_added") {
+            newOwed = owed + amount;
+            debtsSheet.getRange(debtRow, 4).setValue(newOwed);
+        }
+
+        appendDebtLogEntry_(
+            debtsSheet,
+            debtRow,
+            debtValues,
+            employee.name,
+            `Restored ${type === "payment" ? "payment" : "invoice"} transaction of ${Math.abs(amount)} (owner)`,
+        );
+    }
+
+    sheet.getRange(row, 11).setValue(""); // Deleted At
+    sheet.getRange(row, 12).setValue(""); // Deleted By
+
+    return { success: true, alreadyRestored: false, clientId, newOwed, newPaid };
 }
 
 // Edit-role employees only. Re-pulls live balances from Daftra -- can take
