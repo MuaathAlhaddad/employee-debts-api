@@ -10,6 +10,35 @@ Each entry: date, decision, why, where it's enforced/relevant in code.
 
 ---
 
+## 2026-09-13 — Daily Notebook backups are an additional disaster-recovery layer; Daftra remains an independent financial source, and the backup process is read-only
+
+**Decision:** A daily Apps Script trigger (`setupDailyBackupTrigger()`/`runNotebookBackup()`,
+`Backup.gs`) writes a complete snapshot of Notebook (Short debtor) data -- customers, the full
+transaction ledger, tags/assignments, migration links, and the review log, all including
+soft-deleted rows -- to a dedicated Google Drive folder tree
+(`AlFajr/Notebook Backups/YYYY/YYYY-MM/YYYY-MM-DD/`), once per day, validated (SHA-256 checksums,
+count round-trip) before being marked successful. This is **read-only** with respect to every
+financial record: it never writes to Debts Snapshot, Short Debtor Transactions, Notebook Tags/Client
+Tags, Client Migrations, or Daftra -- only to the new Drive folder and a new, dedicated
+"Notebook Backup Status" sheet. Long (Daftra) debtors are explicitly out of scope for this backup.
+
+**Why:** Direct request -- disaster recovery for the Notebook system specifically (the Sheet, this
+Apps Script project, the PWA, a future migration, or a future code change could all lose or corrupt
+this data, and until now there was no independent copy outside the live spreadsheet). Daftra is
+**not** being backed up here and doesn't need to be: it's the shop's existing, independent financial
+system of record for Long debtors, with its own data and its own durability outside this codebase's
+control. This backup exists specifically to cover the gap that DOES exist -- Notebook (Short)
+debtors, whose only system of record has always been this one Google Sheet.
+
+**How to apply:** Never make this backup path write to Debts Snapshot, Short Debtor Transactions, or
+any other live financial sheet, or call any Daftra write endpoint -- if a future change to
+`Backup.gs` needs to write something, that is a different feature and needs its own explicit
+decision here first. Don't fold Long (Daftra) debtors into this backup's scope without a new
+decision -- Daftra already being the system of record for them is the reason they were left out, not
+an oversight. See `ARCHITECTURE.md`'s "Daily Notebook backup to Google Drive" section for the full
+design, the restoration procedure, and the one-time manual setup steps
+(`setupDailyBackupTrigger()`, OAuth scope acceptance, optional Script Properties).
+
 ## 2026-09-10 — Owner-only Notebook deletion is a soft delete with real restore support, not a hard delete
 
 **Decision:** `deleteShortDebt()`/`deleteShortTransaction()` (Debts.gs) never remove a row. They set

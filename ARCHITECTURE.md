@@ -126,6 +126,104 @@ client's own tags (`getClientTagsMap_()`) the same one-call way `getClientMigrat
 migration state to Long debtors; `syncBundle()` additionally bundles the full tag registry so the
 frontend's filter row and "assign an existing tag" picker work from the synced cache.
 
+## Daily Notebook backup to Google Drive (added 2026-09-13)
+
+Disaster recovery for the Notebook (Short debtor) data specifically -- not a general Sheet backup,
+and not a substitute for Daftra being its own system of record for Long debtors (see DECISIONS.md's
+matching entry). Everything lives in `Backup.gs`.
+
+**What's backed up**, read directly off the live sheets (never through `getDebtsList()`/
+`getShortDebtorTransactions()`, both of which filter out soft-deleted rows and the latter also caps
+at 5 entries per client -- neither is acceptable for a backup that must be complete):
+- Every Debts Snapshot row with `Type === "Short"`, **including soft-deleted** ones.
+- Every Short Debtor Transactions row, **all of them, uncapped, including soft-deleted**.
+- The full Notebook Tags registry and Notebook Client Tags assignment table.
+- The full Client Migrations sheet (explains a migrated Notebook client's carried-over opening
+  balance).
+- The full Debts Review Log (small; shared with Long debtors too, but documents which Notebook log
+  entries were reviewed).
+
+Deliberately **excluded**: the Employees sheet (plaintext PINs -- a secret, and not needed to
+reconstruct Notebook data, since every backed-up row already carries the acting employee's *name*)
+and the existing in-sheet "Short Debtors Backup" tab (`backupShortDebtRows_()`, Daftra.gs -- a
+same-spreadsheet safety net for a *different* failure mode, already effectively covered by backing
+up Debts Snapshot itself).
+
+**Format**: seven JSON files per day (`customers.json`, `transactions.json`, `tags.json`,
+`tag_assignments.json`, `migrations.json`, `review_log.json`, `metadata.json`) -- arrays of named
+objects, not raw sheet rows, so a restore never depends on remembering column positions.
+`metadata.json` carries `backup_version`, `created_at`, `source_spreadsheet_id`, record counts,
+financial totals, and a SHA-256 checksum per file (`Utilities.computeDigest`).
+
+**Where**: `My Drive/AlFajr/Notebook Backups/YYYY/YYYY-MM/YYYY-MM-DD/` -- the whole path is one
+config block, `CONFIG.BACKUP` (Config.gs), not hardcoded around the codebase. Each level is
+found-or-created (`findOrCreateFolder_()`), never blindly created, so re-running never produces a
+duplicate folder. An optional Script Property (`BACKUP_PARENT_FOLDER_ID`) can root `AlFajr` under a
+different Drive folder (e.g. a Shared Drive) instead of the script owner's My Drive.
+
+**Trigger**: `setupDailyBackupTrigger()` deletes any existing trigger pointed at
+`runNotebookBackupTrigger` before creating exactly one new time-based daily trigger (hour
+configurable via `CONFIG.BACKUP.TRIGGER_HOUR`) -- safe to re-run any number of times, including
+after every redeploy. `listBackupTriggers_()` confirms exactly one exists.
+
+**Duplicate/failure safety**: a **"Notebook Backup Status"** sheet gets one append-only row per
+attempt (date, started/completed at, status, counts, error). If a *successful* backup is already
+recorded for today, `runNotebookBackup()` returns immediately without touching Drive again --
+running the trigger twice, or re-running it by hand, is always a safe no-op. A prior *failed*
+attempt's files can be overwritten on retry (they were never valid, so "never overwrite a valid
+backup" doesn't apply) -- `writeBackupFile_()` moves any same-named file to Drive trash (recoverable
+~30 days) rather than permanently deleting it first. On any failure, the error is logged to the
+status sheet AND emailed (`MailApp`) to the script owner (or an override via the
+`BACKUP_NOTIFY_EMAIL` Script Property) before the error is rethrown -- so a trigger-driven failure
+also gets Apps Script's own built-in execution-failure email as a second channel. Tomorrow's backup
+is entirely independent (a different day folder) and is never blocked by today's failure.
+
+**Integrity**: after writing all seven files, each is read back from Drive and its SHA-256 checksum
+recomputed and compared against what was computed before the write -- a backup is only marked
+`success` if every file round-trips byte-for-byte. This catches a truncated/corrupted Drive write;
+it cannot catch a bug that produces wrong data consistently on both the write and the read-back
+(there's nothing else in this design to independently cross-check against at that instant) --
+`testNotebookBackupCounts()` (Tests.gs) is the closest thing to that: an independent read-path
+cross-check against `getDebtsList()`, run by hand.
+
+**Owner-only API actions** (`Api.gs`, both read-only w.r.t. financial data): `getNotebookBackupStatus`
+(recent attempt history, so "did today's backup succeed" is one call away, no Sheet/editor access
+needed) and `runNotebookBackupNow` (manual on-demand backup, e.g. right after a schema change --
+shares every safety property of the trigger since it calls the exact same function).
+
+**Restoration**: never automatic, and never into the production spreadsheet. See "Restoration
+procedure" below.
+
+### Restoration procedure
+
+1. Find the day's folder: `AlFajr/Notebook Backups/YYYY/YYYY-MM/YYYY-MM-DD/` in Drive, or run
+   `getNotebookBackupStatus` for the folder URL.
+2. From the Apps Script editor (never via the HTTP API -- this is deliberately not whitelisted in
+   `Api.gs`), run `restoreNotebookBackupToNewSpreadsheet_("YYYY-MM-DD")` (Backup.gs). It:
+   - Reads all seven files back from that day's folder and verifies every file's SHA-256 checksum
+     against `metadata.json` first -- refuses to restore anything if a checksum doesn't match.
+   - Creates a **brand new spreadsheet** (never touches `SHEET_ID`) named
+     `Notebook Restore Test -- YYYY-MM-DD -- <timestamp>`, with one tab per data file.
+   - Returns `{ spreadsheetUrl, metadata, restoredCounts }`.
+3. Open that new spreadsheet and manually verify counts/balances/history look right (Test 9 in this
+   feature's test plan) -- this is the "restore into a new/test environment" step.
+4. **Only after that verification** would a real rebuild of production data be a deliberate, manual,
+   human decision -- there is no automated "promote this to production" step, and there should not
+   be one added without a new decision here first (see DECISIONS.md). A real rebuild means hand-
+   copying/reconciling the verified rows into the production Debts Snapshot/Short Debtor
+   Transactions/Notebook Tags/etc. sheets, which is exactly the kind of action this backup system
+   exists to make *possible*, not something it does *for* you automatically.
+
+### Manual setup required (once)
+
+- Run `setupDailyBackupTrigger()` once from the Apps Script editor, as the shop owner's Google
+  account (so backups land in the owner's Drive, private by default) -- see CLAUDE.md's "Deploying"
+  section for why this can't be done through a `clasp push` alone.
+- The first run of anything in `Backup.gs` (DriveApp/MailApp) will prompt for additional OAuth scope
+  authorization -- accept it as the same account that owns the Sheet/script.
+- Optionally set `BACKUP_PARENT_FOLDER_ID`/`BACKUP_NOTIFY_EMAIL` Script Properties if the defaults
+  (My Drive root / the script's effective user) aren't right for this deployment.
+
 ## Where to look next
 
 - `CLAUDE.md` — file-by-file architecture detail and non-obvious Daftra-integration gotchas for

@@ -289,6 +289,15 @@ function runSmokeTests(employeeName, employeePin) {
     //     first (the rename/suspend field-name guess needs manual
     //     confirmation before ANY automated test touches a client's
     //     business_name/suspend field, even the designated test one).
+    //   - The daily Notebook backup (Backup.gs) -- deliberately NOT run as
+    //     part of this suite, even though it's read-only w.r.t. financial
+    //     data, because it writes real files to the real Drive backup
+    //     folder and a real row to "Notebook Backup Status" every time,
+    //     and only ever succeeds ONCE per calendar day by design (see
+    //     Backup.gs's hasSuccessfulBackupToday_() guard) -- running it here
+    //     would make every OTHER deploy-triggered smoke test run that day
+    //     silently report "skipped" instead of actually exercising
+    //     anything. See testNotebookBackupCounts() below instead.
 
     const passed = results.filter((r) => r.passed).length;
     return { passed, total: results.length, results };
@@ -345,4 +354,84 @@ function testClientRenameSuspendRoundTrip(clientId) {
     }
 
     Logger.log("Rename+suspend round trip OK for client %s (restored to name=%s, suspend=0).", clientId, originalName);
+}
+
+// ============================================================
+// Notebook backup (Backup.gs) -- read-only cross-check, run by hand
+// (function dropdown -> testNotebookBackupCounts -> Run -> View Logs). Not
+// part of runSmokeTests -- see that function's "NOT covered here" comment
+// for why. Safe to run any time, against real production data: it never
+// writes anything (unlike runNotebookBackup()/runNotebookBackupNow, which
+// this does NOT call), it only compares two different read paths over the
+// same live sheets and confirms they agree.
+// ============================================================
+
+function testNotebookBackupCounts() {
+    // getDebtsList() needs a real employee identity purely to authenticate --
+    // any active employee's name/PIN works here since this only reads.
+    // Fill these in by hand before running.
+    const employeeName = "";
+    const employeePin = "";
+
+    if (!employeeName || !employeePin) {
+        throw new Error("Set employeeName/employeePin at the top of testNotebookBackupCounts() before running it.");
+    }
+
+    const appView = getDebtsList(employeeName, employeePin);
+    const backupCustomers = getNotebookCustomersForBackup_();
+
+    // getDebtsList() already excludes soft-deleted Short clients -- the
+    // backup does NOT (it must preserve deleted rows). The non-deleted
+    // subset of the backup must therefore match the app's "short" list
+    // exactly, count for count.
+    const nonDeletedBackup = backupCustomers.filter((c) => !c.deletedAt);
+    if (nonDeletedBackup.length !== appView.short.length) {
+        throw new Error(
+            `Customer count mismatch: backup (non-deleted) has ${nonDeletedBackup.length}, ` +
+                `getDebtsList() has ${appView.short.length}.`,
+        );
+    }
+
+    // Cross-check every non-deleted backup row has a matching app-visible
+    // row with the same owed/paid amounts (catches a subtle mapping bug --
+    // e.g. a swapped column index -- that a count-only check would miss).
+    const appByClientId = {};
+    appView.short.forEach((d) => {
+        appByClientId[d.clientId] = d;
+    });
+
+    nonDeletedBackup.forEach((c) => {
+        const match = appByClientId[c.clientId];
+        if (!match) throw new Error(`Backup customer ${c.clientId} (${c.clientName}) isn't in getDebtsList()'s short list.`);
+        if (match.amount !== c.amountOwed || match.amountPaid !== c.amountPaid) {
+            throw new Error(
+                `Amount mismatch for ${c.clientId}: app has owed=${match.amount}/paid=${match.amountPaid}, ` +
+                    `backup has owed=${c.amountOwed}/paid=${c.amountPaid}.`,
+            );
+        }
+    });
+
+    // Transactions: the app's own getShortDebtorTransactions() caps at 5
+    // per client and excludes soft-deleted rows, so it can't be compared
+    // count-for-count here -- instead just confirm the backup's own
+    // internal count is self-consistent with a direct, independent sheet
+    // read (guards against a future refactor accidentally re-introducing a
+    // cap or a filter into the backup's own reader).
+    const txSheet = getShortTransactionsSheet_();
+    const txLastRow = txSheet.getLastRow();
+    const rawTxCount = txLastRow <= 1 ? 0 : txSheet.getRange(2, 3, txLastRow - 1, 1).getValues().filter((r) => r[0] !== "" && r[0] != null).length;
+    const backupTransactions = getNotebookTransactionsForBackup_();
+
+    if (backupTransactions.length !== rawTxCount) {
+        throw new Error(`Transaction count mismatch: backup has ${backupTransactions.length}, raw sheet has ${rawTxCount}.`);
+    }
+
+    const result = {
+        customersChecked: nonDeletedBackup.length,
+        deletedCustomersInBackupOnly: backupCustomers.length - nonDeletedBackup.length,
+        transactionsChecked: backupTransactions.length,
+    };
+
+    Logger.log("testNotebookBackupCounts PASSED: %s", JSON.stringify(result));
+    return result;
 }

@@ -28,6 +28,10 @@ const CONFIG = {
         // rather than a comma-separated/JSON blob on the Debts Snapshot row.
         NOTEBOOK_TAGS: "Notebook Tags",
         NOTEBOOK_CLIENT_TAGS: "Notebook Client Tags",
+        // Daily Notebook backup status log (2026-09-13) -- see Backup.gs.
+        // Append-only: one row per backup attempt, never edited/deleted, so
+        // it's a full history of every run, not just today's.
+        NOTEBOOK_BACKUP_STATUS: "Notebook Backup Status",
     },
 
     DEBT_STATUS: {
@@ -44,4 +48,32 @@ const CONFIG = {
     // it's treated as stale and re-fetched live -- see
     // getDaftraProductPurchaseHistoryCached_() in Daftra.gs.
     PRODUCT_PRICE_CACHE_MAX_AGE_DAYS: 7,
+
+    // Daily Notebook (Short debtor) backup to Google Drive (2026-09-13) --
+    // see Backup.gs. This is the SINGLE place the backup location/schedule
+    // is configured; nothing below should be hardcoded again elsewhere.
+    BACKUP: {
+        // Folder path under Drive, created (once) on first run --
+        // findOrCreateBackupFolder_() never creates a duplicate if it
+        // already exists. Change this to move where future backups land;
+        // it does not move backups that already exist.
+        ROOT_FOLDER_NAME: "AlFajr",
+        BACKUPS_FOLDER_NAME: "Notebook Backups",
+        // Optional escape hatch: a Script Property (Project Settings ->
+        // Script Properties) named BACKUP_PARENT_FOLDER_ID pointing at an
+        // existing Drive folder ID (e.g. a Shared Drive folder) to root
+        // ROOT_FOLDER_NAME under, instead of the script owner's My Drive
+        // root. Leave unset to use My Drive.
+        PARENT_FOLDER_ID_PROPERTY: "BACKUP_PARENT_FOLDER_ID",
+        // Hour of day (0-23, script timezone -- see appsscript.json's
+        // "timeZone") the daily trigger targets. setupDailyBackupTrigger()
+        // reads this at setup time; changing it requires re-running that
+        // function.
+        TRIGGER_HOUR: 3,
+        // Optional Script Property overriding who gets the failure email
+        // (BACKUP_NOTIFY_EMAIL). Falls back to the script's own effective
+        // user (whoever authorized/owns the trigger) if unset.
+        NOTIFY_EMAIL_PROPERTY: "BACKUP_NOTIFY_EMAIL",
+        BACKUP_VERSION: "1.0.0",
+    },
 };

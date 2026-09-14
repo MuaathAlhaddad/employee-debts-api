@@ -7,6 +7,68 @@ resolving it.
 
 ---
 
+## Limitations (documented 2026-09-13) — Daily Notebook backup (Backup.gs)
+
+Not bugs -- deliberate scope/design limits worth knowing before relying on this for recovery. See
+`ARCHITECTURE.md`'s "Daily Notebook backup to Google Drive" section and `DECISIONS.md`'s matching
+entry for the full design.
+
+- **Creating the missing helper sheets is a (harmless) side effect of reading them.**
+  `getNotebookTagsSheet_()`/`getNotebookClientTagsSheet_()`/`getClientMigrationsSheet_()`/
+  `getDebtsReviewSheet_()` all lazily `insertSheet()` themselves if missing (the same pattern those
+  features already use elsewhere) -- so the very first backup run on a spreadsheet that's never used
+  Notebook tags/migrations/review-log yet will create those empty tabs. No financial data is
+  touched; only empty header rows are added.
+- **The daily trigger cannot be created by `clasp push`/`clasp deploy`.** `setupDailyBackupTrigger()`
+  must be run once, by hand, from the Apps Script editor, as the shop owner's Google account -- there
+  is no way to script trigger creation as part of the deploy process itself. If this is ever
+  forgotten (e.g. after recreating the whole Apps Script project from scratch), backups silently
+  stop with no error, since nothing is invoking `runNotebookBackupTrigger` at all.
+  `listBackupTriggers_()` (run from the editor) confirms whether one currently exists.
+- **Integrity validation catches a corrupted/truncated Drive write, not a wrong-but-consistent
+  read.** The read-back checksum comparison in `runNotebookBackup()` would not detect a bug that
+  produces the same wrong value on both the initial sheet read and Drive's read-back -- there is
+  nothing else in this design to independently cross-check against at that instant.
+  `testNotebookBackupCounts()` (Tests.gs, run by hand) is an independent read-path cross-check
+  against `getDebtsList()`, but it only exercises non-deleted, non-Daftra-sourced data paths that
+  overlap with what the app itself already reads.
+- **No automated retention/cleanup.** Every daily backup is kept forever by design (explicit
+  instruction, 2026-09-13) -- Drive storage cost was accepted in exchange for never losing an older
+  recovery point automatically. If storage ever becomes a real constraint, that needs a new decision
+  here (with an explicit retention policy) before any automatic deletion is added -- don't add one
+  unilaterally.
+- **Restore is manual and editor-only, by design** (`restoreNotebookBackupToNewSpreadsheet_()`,
+  deliberately not in the `Api.gs` whitelist) -- there's no one-click "restore to production" and
+  none should be added without a new decision here, given how easily that could overwrite live data.
+- **Failure email depends on `Session.getEffectiveUser().getEmail()` resolving to something usable**
+  unless `BACKUP_NOTIFY_EMAIL` is explicitly set as a Script Property -- in some Workspace domain
+  configurations this can come back blank, in which case a failure is still recorded in the
+  "Notebook Backup Status" sheet and Apps Script's own execution log, but no email goes out. Set
+  `BACKUP_NOTIFY_EMAIL` explicitly if failure emails aren't arriving.
+- **Verified live against production, 2026-09-13/14** (real data: 117 Notebook customers, 314
+  transactions, 4 tags, 5 assignments, 30 migrations, 239 review-log entries): manual backup
+  generation, record counts, soft-delete preservation (2 deleted customers + 9 deleted transactions
+  correctly included), tag/assignment backup, exactly-one-successful-backup-per-day (a real bug was
+  found and fixed here -- see below), simulated failure (bad `BACKUP_PARENT_FOLDER_ID`, confirmed
+  logged + emailed + previous state untouched), and restore into a brand-new spreadsheet (checksum
+  verification passed, all six files' counts matched the original backup exactly). Not independently
+  re-verified since: that the failure email actually arrives in the owner's inbox (the send call
+  succeeded without throwing, per the status sheet, but the inbox itself wasn't checked), and running
+  the actual `runNotebookBackupTrigger` from a real fired time-based trigger rather than a manual
+  invocation of the same underlying function.
+  - **Bug found and fixed during this verification**: `hasSuccessfulBackupToday_()` originally
+    compared the Status sheet's Date column with `String(row[0]) === dateStr`. Sheets silently
+    auto-converts a "yyyy-MM-dd"-looking string into a real Date cell on write (the same class of
+    bug `DEBTS_HEADERS`' date columns already had to work around elsewhere in this codebase) --
+    confirmed live: a second same-day manual backup did NOT skip, it silently re-ran the full
+    pipeline and wrote a second "success" row. Fixed by comparing with `normalizeDebtDate_()`
+    instead of `String()`, plus formatting the Date column as plain text on sheet creation as a
+    second line of defense. Re-verified after the fix: a second run correctly skipped in ~2 seconds
+    with no Drive access. If this function is ever touched again, re-test the same-day-duplicate
+    case live, not just by reading the code -- this exact bug looked correct on inspection.
+
+---
+
 ## PROCESS FAILURE (mitigated 2026-09-05, watch for recurrence) — Git history materially understates real history here
 
 **What happened:** Commit `4d77bde` (2026-09-02) is titled, verbatim: *"Bundled catch-up commit

@@ -74,6 +74,14 @@ const API_ACTIONS = {
     searchProducts,
     getProductPurchaseHistory,
 
+    // Daily Notebook backup (Backup.gs) -- Owner-only (each re-checks the
+    // role server-side). Both are read-only w.r.t. Notebook/Daftra
+    // financial data -- they only ever write to the Drive backup folder
+    // and the "Notebook Backup Status" sheet. Restore is deliberately NOT
+    // exposed here -- editor-only, see Backup.gs's own comment.
+    getNotebookBackupStatus,
+    runNotebookBackupNow,
+
     // Smoke tests -- see README.md. Self-cleaning writes against the two
     // designated test clients only -- NEVER call with a real client_id.
     runSmokeTests,
