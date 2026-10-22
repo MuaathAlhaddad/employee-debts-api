@@ -10,6 +10,18 @@ Each entry: date, decision, why, where it's enforced/relevant in code.
 
 ---
 
+## 2026-10-22 — getShortDebtorTransactions() entries now include `actor`
+
+**Decision:** Each entry returned by `getShortDebtorTransactions()` (`Debts.gs`) carries `actor` — the
+Short Debtor Transactions sheet's existing "Actor" column (row[7]), `""` when blank. Additive, read-only:
+no sheet layout, write path, sort, or 5-row cap changes.
+
+**Why:** `employee-debts-app`'s Notebook ledger redesign (its own DECISIONS.md, 2026-10-22) shows
+"Ahmed, 22 Oct - 10:30 AM" under each row's type badge. The app already degrades to date-only when
+`actor` is missing, so frontend and backend can ship in either order.
+
+---
+
 ## 2026-09-13 — Daily Notebook backups are an additional disaster-recovery layer; Daftra remains an independent financial source, and the backup process is read-only
 
 **Decision:** A daily Apps Script trigger (`setupDailyBackupTrigger()`/`runNotebookBackup()`,

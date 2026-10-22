@@ -705,6 +705,7 @@ function getShortDebtorTransactions(employeeName, employeePin, clientId) {
             description: (row[4] === "payment" ? "Payment received" : "Debt added") + (row[8] ? ` -- ${row[8]}` : ""),
             amount: Number(row[5]) || 0,
             remaining: row[6] === "" ? null : Number(row[6]),
+            actor: row[7] || "", // who recorded it -- shown under the ledger row's type badge
         }))
         .sort((a, b) => new Date(b.date) - new Date(a.date))
         .slice(0, 5);
