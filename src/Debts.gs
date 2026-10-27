@@ -687,16 +687,20 @@ function logShortTransaction_(clientId, clientName, type, amount, remaining, act
 // access level (only the writes that create these rows are edit-gated).
 // Soft-deleted entries (deleteShortTransaction() below) are excluded, same
 // as getDebtsList() excludes a soft-deleted Notebook client.
-function getShortDebtorTransactions(employeeName, employeePin, clientId) {
+//
+// `count` (default 5) is how many of the newest entries to return; the
+// PWA's "Show 5 older transactions" link re-asks with 5 more each tap.
+function getShortDebtorTransactions(employeeName, employeePin, clientId, count) {
     authenticateEmployee(employeeName, employeePin);
+    count = normalizeStatementCount_(count);
 
     const sheet = getShortTransactionsSheet_();
     const lastRow = sheet.getLastRow();
-    if (lastRow <= 1) return { entries: [] };
+    if (lastRow <= 1) return { entries: [], hasMore: false };
 
     const rows = sheet.getRange(2, 1, lastRow - 1, SHORT_TX_HEADERS.length).getValues();
 
-    const entries = rows
+    const all = rows
         .filter((row) => String(row[2]) === String(clientId) && !row[10])
         .map((row) => ({
             id: row[9] || null, // real, stable id -- used by deleteShortTransaction()
@@ -707,10 +711,17 @@ function getShortDebtorTransactions(employeeName, employeePin, clientId) {
             remaining: row[6] === "" ? null : Number(row[6]),
             actor: row[7] || "", // who recorded it -- shown under the ledger row's type badge
         }))
-        .sort((a, b) => new Date(b.date) - new Date(a.date))
-        .slice(0, 5);
+        .sort((a, b) => new Date(b.date) - new Date(a.date));
 
-    return { entries };
+    return { entries: all.slice(0, count), hasMore: all.length > count };
+}
+
+// Shared by both account-statement reads: 5 by default, capped at 200 so a
+// bad/huge value can't turn one request into a full-history Daftra scan.
+function normalizeStatementCount_(count) {
+    const n = Math.floor(Number(count));
+    if (!n || n < 1) return 5;
+    return Math.min(n, 200);
 }
 
 // ============================================================
@@ -943,10 +954,10 @@ function refreshDebtsFromApp(employeeName, employeePin) {
 // ============================================================
 
 // Any logged-in employee can view a Long Debtor's account statement.
-function getLongDebtorAccount(employeeName, employeePin, clientId) {
+function getLongDebtorAccount(employeeName, employeePin, clientId, count) {
     authenticateEmployee(employeeName, employeePin);
 
-    return getDaftraClientStatement(clientId);
+    return getDaftraClientStatement(clientId, count);
 }
 
 // Manual "needs reconciliation" flag -- our balance calc has no way to

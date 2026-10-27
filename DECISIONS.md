@@ -10,6 +10,21 @@ Each entry: date, decision, why, where it's enforced/relevant in code.
 
 ---
 
+## 2026-10-27 — Account statement reads take an optional `count`, and return `hasMore`
+
+**Decision:** `getLongDebtorAccount()`/`getDaftraClientStatement()` and `getShortDebtorTransactions()` take an
+optional trailing `count` (default 5, clamped to 1–200 by `normalizeStatementCount_()`, `Debts.gs`) and return
+`{ entries, hasMore }`. For Long debtors, `fetchDaftraRecentEntries_()` still reads only the last 2 Daftra pages
+unless `count + 1` needs more, then walks back a page at a time (stopping at page 1). Each resource is fetched
+for `count + 1` so `hasMore` is exact. No args → identical to the old behavior (5 rows), plus `hasMore`.
+
+**Why:** Owner asked for a "show 5 more older transactions" link in the PWA's client account
+(`employee-debts-app` DECISIONS.md, same date). The app re-asks for the newest N+5 rather than paging by
+offset, so a row added or deleted in between can't cause a gap or duplicate. The 200 cap keeps one request from
+becoming a full-history Daftra scan (one client has 2,680 invoices).
+
+---
+
 ## 2026-10-22 — getShortDebtorTransactions() entries now include `actor`
 
 **Decision:** Each entry returned by `getShortDebtorTransactions()` (`Debts.gs`) carries `actor` — the

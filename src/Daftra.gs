@@ -359,10 +359,14 @@ function daftraEntryRunningBalance_(item) {
     }
 }
 
-function getDaftraClientStatement(clientId) {
+// `count` (default 5) is how many of the newest entries to return -- the
+// PWA's "Show 5 older transactions" link (2026-10-27) re-asks with 5 more
+// each tap. Each resource is fetched for count+1 so `hasMore` is exact.
+function getDaftraClientStatement(clientId, count) {
+    count = normalizeStatementCount_(count);
     const entries = []; // { date, type, description, amount, remaining }
 
-    fetchDaftraRecentEntries_("invoices.json", { client_id: clientId }, "Invoice").forEach((inv) => {
+    fetchDaftraRecentEntries_("invoices.json", { client_id: clientId }, "Invoice", count + 1).forEach((inv) => {
         entries.push({
             id: inv.id,
             date: inv.date || inv.created,
@@ -376,7 +380,7 @@ function getDaftraClientStatement(clientId) {
     // "invoice_payment" and "client_payment" are the same underlying
     // Daftra record under two different API resource names (confirmed
     // 2026-08-31) -- both edit the same way, via editDaftraClientPayment_.
-    fetchDaftraRecentEntries_("invoice_payments.json", { client_id: clientId }, "InvoicePayment").forEach((p) => {
+    fetchDaftraRecentEntries_("invoice_payments.json", { client_id: clientId }, "InvoicePayment", count + 1).forEach((p) => {
         entries.push({
             id: p.id,
             date: p.date,
@@ -387,7 +391,7 @@ function getDaftraClientStatement(clientId) {
         });
     });
 
-    fetchDaftraRecentEntries_("client_payments.json", { client_id: clientId }, "ClientPayment").forEach((p) => {
+    fetchDaftraRecentEntries_("client_payments.json", { client_id: clientId }, "ClientPayment", count + 1).forEach((p) => {
         entries.push({
             id: p.id,
             date: p.date,
@@ -400,7 +404,7 @@ function getDaftraClientStatement(clientId) {
 
     entries.sort((a, b) => new Date(b.date) - new Date(a.date));
 
-    return { entries: entries.slice(0, 5) };
+    return { entries: entries.slice(0, count), hasMore: entries.length > count };
 }
 
 // Fetches just the TAIL of a client-filtered, paginated Daftra list --
@@ -411,8 +415,10 @@ function getDaftraClientStatement(clientId) {
 // of records (one has 2,680 invoices), so scanning everything just to
 // find the 5 newest would reintroduce the exact 20-30+ second slowness
 // this account statement was already fixed once for. Bounded to at most
-// 2 requests regardless of how much history the client has.
-function fetchDaftraRecentEntries_(path, params, unwrapKey) {
+// 2 requests unless `minItems` (the caller's count+1) needs more than those
+// 2 pages hold -- then it keeps walking back one page at a time, and
+// stops at page 1.
+function fetchDaftraRecentEntries_(path, params, unwrapKey, minItems) {
     const limit = 100;
     const first = daftraGet_(path, Object.assign({}, params, { page: 1, limit }));
     const firstItems = daftraExtractList_(first).map((item) => daftraUnwrap_(item, unwrapKey));
@@ -421,13 +427,13 @@ function fetchDaftraRecentEntries_(path, params, unwrapKey) {
     if (!pageCount || pageCount <= 1) return firstItems;
 
     const items = [];
-    [pageCount - 1, pageCount].forEach((page) => {
-        if (page < 1) return;
+    for (let page = pageCount; page >= 1; page--) {
+        if (page <= pageCount - 2 && items.length >= (minItems || 0)) break;
         const payload = page === 1 ? first : daftraGet_(path, Object.assign({}, params, { page, limit }));
         daftraExtractList_(payload)
             .map((item) => daftraUnwrap_(item, unwrapKey))
             .forEach((item) => items.push(item));
-    });
+    }
 
     return items;
 }
